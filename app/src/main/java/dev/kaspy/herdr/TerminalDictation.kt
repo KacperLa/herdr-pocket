@@ -47,6 +47,7 @@ internal fun TerminalDictationControls(
     enabled: Boolean,
     terminalIdentity: () -> Any?,
     send: (Any, String, () -> Boolean, (Boolean) -> Unit) -> Boolean,
+    onExclusiveDock: () -> Unit,
     shortcuts: @Composable (@Composable () -> Unit) -> Unit,
 ) {
     val context = LocalContext.current
@@ -118,6 +119,20 @@ internal fun TerminalDictationControls(
         DictationPhase.SUBMITTING -> "Submitting recognized text to the active terminal."
         null -> dictation.notice ?: "Ready for on-device dictation."
     }
+    val exclusive = phase?.replacesQuickActions == true
+    val currentOnExclusiveDock by rememberUpdatedState(onExclusiveDock)
+    LaunchedEffect(exclusive) {
+        if (exclusive) currentOnExclusiveDock()
+    }
+    if (exclusive && phase != null) {
+        DictationDock(
+            phase = phase,
+            levels = { dictation.micLevels },
+            onCancel = dictation::discardFromDock,
+            onStop = { dictation.tap {} },
+        )
+        return
+    }
     shortcuts {
         IconButton(
             onClick = { dictation.tap { permission.launch(Manifest.permission.RECORD_AUDIO) } },
@@ -128,13 +143,11 @@ internal fun TerminalDictationControls(
                 liveRegion = LiveRegionMode.Polite
             },
             colors = IconButtonDefaults.iconButtonColors(
-                containerColor = if (phase?.isRecording == true) Color(0xFFB8202D) else Color.Transparent,
-                contentColor = Color.White,
+                containerColor = Color.Transparent, contentColor = Color.White,
             ),
         ) {
             val color = if (dictation.permissionPending) Color.White.copy(alpha = .38f) else Color.White
-            Icon(painterResource(if (phase?.acceptsStopAndSend == true) R.drawable.ic_terminal_record_stop
-                else R.drawable.ic_terminal_mic),contentDescription=null,
+            Icon(painterResource(R.drawable.ic_terminal_mic),contentDescription=null,
                 tint=color,modifier=Modifier.size(DockGlyphSize))
         }
     }
@@ -154,6 +167,8 @@ private class TerminalDictation(
     var permissionPending by mutableStateOf(false)
         private set
     var notice by mutableStateOf<String?>(null)
+        private set
+    var micLevels by mutableStateOf(emptyList<Float>())
         private set
     private var recognizer: SpeechRecognizer? = null
     private var capture: DictationCapture? = null
@@ -235,11 +250,15 @@ private class TerminalDictation(
             return
         }
 
+        micLevels = emptyList()
         phase = DictationPhase.STARTING
         val worker = DictationCapture(context.mainExecutor, onStarted = {
             if (take === ticket && phase == DictationPhase.STARTING && stillHere(ticket)) {
                 phase = DictationPhase.RECORDING
             }
+        }, onLevel = { level ->
+            if (take === ticket && phase == DictationPhase.RECORDING)
+                micLevels = appendDictationLevel(micLevels, level)
         }, onComplete = { pcm, capped ->
             capture = null
             if (take !== ticket || !stillHere(ticket)) {
@@ -281,6 +300,7 @@ private class TerminalDictation(
         }
         transcriptionTimeout = dictationReplayTimeoutMillis(pcm.length, realTime)
         phase = DictationPhase.TRANSCRIBING
+        micLevels = emptyList()
         try {
             if (!realTime) savedReplay = pcm.copyForReplay()
             val pipe = DictationAudioPipe.open(pcm)
@@ -359,6 +379,8 @@ private class TerminalDictation(
         if (take?.terminal?.let { it !== terminal } == true) cancel("The active terminal changed. Nothing was sent.")
     }
 
+    fun discardFromDock() = cancel("Dictation cancelled. Nothing was sent.")
+
     fun dispose() = cancel(null)
 
     private fun hasMicPermission(): Boolean =
@@ -372,6 +394,7 @@ private class TerminalDictation(
         take?.cancel()
         take = null
         phase = null
+        micLevels = emptyList()
         capture?.cancel()
         capture = null
         captured?.close()

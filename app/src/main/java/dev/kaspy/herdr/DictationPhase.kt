@@ -5,6 +5,8 @@ internal enum class DictationPhase {
 
     val acceptsStopAndSend get() = this == RECORDING || this == CAPTURED
     val isRecording get() = this == RECORDING
+    val showsTranscribing get() = this == STOPPING || this == TRANSCRIBING || this == RETRYING || this == SUBMITTING
+    val replacesQuickActions get() = this == STARTING || this == RECORDING || this == CAPTURED || showsTranscribing
 }
 
 /** Do not submit partial segments, or a mic-based result from a provider ignoring the audio source. */

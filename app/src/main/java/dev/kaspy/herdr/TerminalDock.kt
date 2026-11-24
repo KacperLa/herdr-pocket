@@ -84,7 +84,8 @@ internal fun TerminalDock(
     var directionsExpanded by remember(terminalIdentity,active) { mutableStateOf(false) }
     fun canSend()=active && m.speechTerminalIdentity()===terminalIdentity
     BackHandler(enabled=directionsExpanded) { directionsExpanded=false }
-    TerminalDictationControls(enabled=inputEnabled && m.dictationEnabled,terminalIdentity=m::speechTerminalIdentity,send=m::sendDictation) { mic ->
+    TerminalDictationControls(enabled=inputEnabled && m.dictationEnabled,terminalIdentity=m::speechTerminalIdentity,send=m::sendDictation,
+        onExclusiveDock={directionsExpanded=false}) { mic ->
         Surface(
             modifier=Modifier.fillMaxWidth().padding(horizontal=8.dp,vertical=5.dp),
             shape=CircleShape,

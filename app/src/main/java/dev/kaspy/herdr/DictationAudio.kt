@@ -32,6 +32,7 @@ internal class DictationPcm(val bytes: ByteArray, val length: Int, val peak: Int
 internal class DictationCapture(
     private val main: Executor,
     private val onStarted: () -> Unit,
+    private val onLevel: (Float) -> Unit,
     private val onComplete: (DictationPcm?, Boolean) -> Unit,
 ) {
     private val state = AtomicInteger(CAPTURE_RUNNING)
@@ -47,6 +48,7 @@ internal class DictationCapture(
         var size = 0
         var peak = 0
         val samples = ShortArray(2048)
+        val levels = DictationMicLevels { level -> main.execute { onLevel(level) } }
         var success = false
         try {
             if (state.get() == CAPTURE_CANCEL) return
@@ -73,6 +75,7 @@ internal class DictationCapture(
                 else for (i in 0 until count) {
                     val sample = samples[i].toInt()
                     peak = maxOf(peak, abs(sample))
+                    levels.add(sample)
                     buffer[size++] = sample.toByte()
                     buffer[size++] = (sample shr 8).toByte()
                 }

@@ -204,3 +204,8 @@ Pocket records bounded 16 kHz mono PCM in memory on a worker until the stop tap 
 ## Recorded-audio recognition compatibility (0.68)
 
 Replay starts after recognizer readiness or a short fallback delay and feeds PCM in paced frames. On no-match, speech timeout, or incomplete final input, retry the same in-memory recording once at real-time speed. Old recognizer callbacks cannot submit into a retry or a different terminal. Entirely zero microphone samples are reported separately from a transcription failure. The hardening does not enable cloud recognition or retain audio after the request. Unit tests cover replay durations and existing final-result/terminal guards. Physical Pixel microphone and recognizer acceptance still need a handset test.
+
+
+## Dictation feedback dock (0.69)
+
+The quick actions and direction popover hide during capture and processing. A right-to-left recording waveform shows 40 ms RMS windows of actual PCM (drawn as muted white rounded bars). Cancel discards the take; stop uses the existing transcribe-and-send action. Stop, recognition, retry and terminal-submit phases show “Transcribing audio…” in place of the waveform. Tests cover silence/clipping, ordered bounded history and phase routing. No handset rendering or microphone recognition test.

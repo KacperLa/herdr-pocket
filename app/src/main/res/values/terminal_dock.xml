@@ -22,4 +22,10 @@
     <string name="terminal_key_up">Up</string>
     <string name="terminal_key_right">Right</string>
     <string name="terminal_key_down">Down</string>
+    <string name="dictation_cancel">Cancel dictation</string>
+    <string name="dictation_stop_and_send">Recording. Stop, transcribe, and send</string>
+    <string name="dictation_send_recording">Transcribe and send the recording</string>
+    <string name="dictation_transcribing">Transcribing audio…</string>
+    <string name="dictation_recording_ready">Recording ready</string>
+    <string name="dictation_starting">Starting microphone…</string>
 </resources>
