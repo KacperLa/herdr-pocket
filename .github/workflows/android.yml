@@ -1,0 +1,58 @@
+name: Build unsigned APK
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install pinned Temurin JDK 21
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/herdr-temurin.tar.gz"
+          java_home="$RUNNER_TEMP/herdr-temurin"
+          curl --fail --silent --show-error --location --retry 3 --output "$archive" 'https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.13.1%2B2/OpenJDK21U-jdk_x64_linux_hotspot_21.0.13.1_2.tar.gz'
+          printf '%s  %s\n' 'bb8a93f9ae6e7a693b2b721e85dbeff26ae1a77447985a8d7afcdd9c7cf6222e' "$archive" | sha256sum --check
+          mkdir -p "$java_home"
+          tar -xzf "$archive" --strip-components=1 -C "$java_home"
+          printf 'JAVA_HOME=%s\n' "$java_home" >> "$GITHUB_ENV"
+          printf '%s/bin\n' "$java_home" >> "$GITHUB_PATH"
+      - uses: gradle/actions/setup-gradle@017a9effdb900e5b5b2fddfb590a105619dca3c3 # v4.4.2
+        with:
+          gradle-version: '9.9.1'
+          cache-disabled: true
+      - name: Install Android SDK packages
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-37.0' 'build-tools;36.0.0'
+      - name: Compile, test, and lint
+        run: gradle --no-daemon --no-build-cache :app:assembleRelease :app:testDebugUnitTest :termlib:testDebugUnitTest :app:lintRelease
+      - name: Package unsigned APK and provenance
+        run: |
+          set -euo pipefail
+          mkdir -p build/ci-artifact
+          cp app/build/outputs/apk/release/app-release-unsigned.apk build/ci-artifact/herdr-pocket-unsigned.apk
+          printf '%s\n' "$GITHUB_SHA" > build/ci-artifact/SOURCE_COMMIT.txt
+          (cd build/ci-artifact && sha256sum herdr-pocket-unsigned.apk > SHA256SUMS)
+      - name: Upload unsigned APK
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: herdr-pocket-unsigned-${{ github.sha }}
+          path: build/ci-artifact/
+          if-no-files-found: error
+          retention-days: 7

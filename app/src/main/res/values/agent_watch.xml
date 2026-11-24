@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="agent_watch_service_channel">Agent watch</string>
+    <string name="agent_watch_alert_channel">Agent status alerts</string>
+    <string name="agent_watch_ongoing">Watching agents</string>
+    <string name="agent_watch_connecting_body">Connecting to Herdr</string>
+    <string name="agent_watch_retrying_body">Connection interrupted. Retrying…</string>
+    <string name="agent_watch_watching_body">Done and blocked alerts are on</string>
+    <string name="agent_watch_stop">Stop</string>
+    <string name="agent_watch_blocked_alert">An agent is blocked</string>
+    <string name="agent_watch_done_alert">An agent is done</string>
+    <string name="agent_watch_open_app">Open Herdr Pocket</string>
+</resources>

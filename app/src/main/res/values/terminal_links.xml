@@ -1,0 +1,5 @@
+<resources>
+    <string name="terminal_link_confirm">Open this link?</string>
+    <string name="terminal_link_open">Open in browser</string>
+    <string name="terminal_link_no_browser">Set a default browser in Android Settings to open this link.</string>
+</resources>

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="roster_row_terminal">Terminal</string>
+    <string name="roster_row_error">Error</string>
+    <string name="roster_row_pane_number">Pane %1$d</string>
+    <string name="roster_row_rename">Rename pane</string>
+</resources>

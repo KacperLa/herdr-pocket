@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="agent_status_working">Working</string>
+    <string name="agent_status_blocked">Blocked</string>
+    <string name="agent_status_idle">Idle</string>
+    <string name="agent_status_done">Done</string>
+    <string name="agent_status_unknown">Status unknown</string>
+    <string name="terminal_reconnecting">Reconnecting…</string>
+    <string name="agent_roster_list">Agent and terminal list</string>
+    <string name="agent_roster_refresh">Refresh agents and terminals</string>
+    <string name="agent_roster_agents">Agents</string>
+    <string name="agent_roster_terminals">Terminals</string>
+    <string name="agent_roster_new_terminal">New terminal</string>
+    <string name="agent_roster_spaces">Spaces</string>
+    <string name="agent_roster_agent_list">Agent list</string>
+    <string name="agent_roster_workspace_list">Terminals grouped by workspace</string>
+    <string name="agent_roster_empty_agents">No agents yet. Open Spaces to see your terminals.</string>
+    <string name="agent_roster_empty_spaces">No terminals to show.</string>
+    <string name="agent_roster_search">Search agents and terminals</string>
+    <string name="agent_roster_search_hint">Search</string>
+    <string name="agent_roster_clear_search">Clear search</string>
+    <string name="agent_roster_status_filter">Filter by status</string>
+    <string name="agent_roster_all_terminals">All terminals</string>
+    <string name="agent_roster_no_matches">No matching terminals.</string>
+    <string name="agent_roster_all_agents">All agents</string>
+</resources>

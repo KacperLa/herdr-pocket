@@ -1,0 +1,7 @@
+<resources>
+    <string name="connection_settings">Connection settings</string>
+    <string name="back_to_agents">Back to agents</string>
+    <string name="back_to_terminal">Back to terminal</string>
+    <string name="agents_pane_title">Agents</string>
+    <string name="reconnect">Reconnect</string>
+</resources>

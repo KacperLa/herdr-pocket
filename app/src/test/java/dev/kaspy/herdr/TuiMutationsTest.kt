@@ -1,0 +1,76 @@
+package dev.kaspy.herdr
+
+import org.junit.Assert.*
+import org.junit.Test
+import java.nio.file.Files
+import java.util.concurrent.TimeUnit
+
+class TuiMutationsTest {
+    private val loc=TuiLocation("term_one","w1:p2","w1:t3","w1")
+    private val fields=""""terminal_id":"term_one","pane_id":"w1:p2","tab_id":"w1:t3","workspace_id":"w1""""
+    private fun response(type:String,key:String,value:String) =
+        """{"result":{"type":"$type","$key":$value}}"""
+
+    @Test fun paneRenameRequiresExactAgentLocationAndServerConfirmation() {
+        val renamed=response("pane_info","pane","""{$fields,"label":"Jetson AI"}""")
+        assertTrue(TuiMutations.confirmsPane(renamed,loc,"Jetson AI"))
+        assertFalse(TuiMutations.confirmsPane(renamed,loc.copy(terminalId="term_other")))
+        assertFalse(TuiMutations.confirmsPane(renamed,loc.copy(tabId="w1:t4")))
+        assertFalse(TuiMutations.confirmsPane(renamed,loc,"different label"))
+        assertFalse(TuiMutations.confirmsPane("""{"error":{"code":"pane_not_found"}}""",loc))
+        assertFalse(TuiMutations.confirmsPane("not JSON",loc))
+    }
+
+    @Test fun creationUsesExactReturnedNewPaneAndAgentAndOnlySupportedVersion() {
+        val created="""{"result":{"type":"tab_created","tab":{"tab_id":"w1:t3","workspace_id":"w1"},"root_pane":{$fields}}}"""
+        assertEquals(loc,TuiMutations.newPane(created,"w1"))
+        assertNull(TuiMutations.newPane(created,"w2"))
+        assertNull(TuiMutations.newPane(created.replaceFirst("w1:t3","w1:t4"),"w1"))
+        val started=response("agent_started","agent","""{$fields,"name":"jetson"}""")
+        assertTrue(TuiMutations.confirmsStart(started,loc,"jetson"))
+        assertFalse(TuiMutations.confirmsStart(started,loc,"another"))
+        assertFalse(TuiMutations.confirmsStart(started,loc.copy(terminalId="term_other"),"jetson"))
+        fun version(tag:String)="""{"result":{"type":"session_snapshot","snapshot":{"version":"$tag"}}}"""
+        for(tag in listOf("0.7.5","0.8.2","0.9.5","0.9.5-preview.2")) assertTrue(TuiMutations.canCreateFromRoster(version(tag)))
+        for(tag in listOf("0.6.6","0.7.4","1.0.0","unknown")) assertFalse(TuiMutations.canCreateFromRoster(version(tag)))
+        assertFalse(TuiMutations.canCreateFromRoster("""{"result":{"type":"agent_list","agents":[]}}"""))
+    }
+
+    @Test fun labelsAreSingleInertArgumentsAndOnlyNewTabOperationsAreEmitted() {
+        val root=Files.createTempDirectory("herdr friendly name").toFile()
+        try {
+            val cli=root.resolve(".local/bin/herdr")
+            checkNotNull(cli.parentFile).mkdirs()
+            cli.writeText("#!/bin/sh\nif [ \"\$1\" = --version ]; then printf 'herdr %s\\n' \"\$FIXTURE\"; else printf '%s\\n' \"\$@\"; fi\n")
+            assertTrue(cli.setExecutable(true))
+            fun run(cmd:String,tag:String="0.9.5",exit:Int=0):List<String> {
+                val p=ProcessBuilder("/bin/sh","-c",cmd).redirectErrorStream(true)
+                p.environment()["HOME"]=root.path
+                p.environment()["PATH"]=root.resolve("no-path").path
+                p.environment()["FIXTURE"]=tag
+                val proc=p.start()
+                assertTrue(proc.waitFor(3,TimeUnit.SECONDS))
+                assertEquals(exit,proc.exitValue())
+                return proc.inputStream.bufferedReader().readLines()
+            }
+            assertEquals(listOf("--session","work.local","tab","create","--workspace","w1","--no-focus"),
+                run(TuiMutations.createShellTab("w1","work.local")))
+            val label="Jetson's AI; \$(printf EXTRA)"
+            val scope=listOf("--session","work.local")
+            assertEquals(scope+listOf("pane","get","w1:p2"),run(TuiMutations.inspectPane(loc,"work.local")))
+            assertEquals(scope+listOf("pane","rename","w1:p2",label),run(TuiMutations.renamePane(loc,label,"work.local")))
+            assertEquals(scope+listOf("tab","create","--workspace","w1","--label","jetson","--no-focus"),
+                run(TuiMutations.createTab("w1","jetson","work.local")))
+            assertEquals(listOf("HERDR_POCKET_AGENT_START_UNSUPPORTED"),
+                run(TuiMutations.createTab("w1","jetson",null),"0.7.4",78))
+            assertEquals(scope+listOf("agent","start","jetson","--kind","codex","--pane","w1:p2","--timeout","18000"),
+                run(TuiMutations.startAgent("jetson",TuiMutations.Runner.CODEX,loc,"work.local")))
+            for(unsafe in listOf("--clear","--session=other","bad\nname","", "   ")) {
+                assertFalse(TuiMutations.canRename(unsafe))
+            }
+            assertTrue(runCatching {TuiMutations.renamePane(loc.copy(paneId="other;format"),"Normal",null)}.isFailure)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+}

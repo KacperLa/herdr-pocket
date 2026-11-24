@@ -1,0 +1,12 @@
+<resources>
+    <string name="terminal_paste_clipboard">Paste clipboard text</string>
+    <string name="terminal_paste_unavailable">No pasteable text on the clipboard</string>
+    <string name="terminal_show_keyboard">Show keyboard</string>
+    <string name="terminal_hide_keyboard">Hide keyboard</string>
+    <string name="terminal_key_home">Home</string>
+    <string name="terminal_key_end">End</string>
+    <string name="terminal_key_page_up">Page Up</string>
+    <string name="terminal_key_page_down">Page Down</string>
+    <string name="terminal_key_enter">Enter</string>
+    <string name="terminal_key_tab">Tab</string>
+</resources>

@@ -1,0 +1,8 @@
+<resources>
+    <string name="core_install_copy">Copy HC install command</string>
+    <string name="core_install_clipboard_label">Herdr Core install command</string>
+    <string name="core_install_shell_command" translatable="false">curl -fsSL https://releases.herdr.dev/core/install.sh | sh</string>
+    <string name="core_install_help">Need hc? Run the copied command in a terminal on your Linux or macOS SSH host, as the same user you connect with. This installs Herdr Core and does not migrate Herdr TUI agents.</string>
+    <string name="core_install_copied">HC install command copied.</string>
+    <string name="core_install_copy_failed">Could not copy the command. Try again.</string>
+</resources>
