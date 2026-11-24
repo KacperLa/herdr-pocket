@@ -98,9 +98,10 @@ import androidx.compose.ui.unit.sp
 
     var menuOpen by remember(session.address,enabled) { mutableStateOf(false) }
     val canOpenMenu=agentCard && (onRename!=null || onTogglePin!=null)
+    val renameResource=if(session.isAgent) R.string.roster_row_rename_agent else R.string.roster_row_rename
     val menuLabel=when {
         canOpenMenu -> stringResource(R.string.roster_agent_options)
-        onRename!=null -> stringResource(R.string.roster_row_rename)
+        onRename!=null -> stringResource(renameResource)
         else -> null
     }
     val pinnedLabel=stringResource(R.string.roster_agent_pinned)
@@ -171,7 +172,7 @@ import androidx.compose.ui.unit.sp
               )
           }
           onRename?.let { action ->
-              DropdownMenuItem(text={Text(stringResource(R.string.roster_row_rename))},
+              DropdownMenuItem(text={Text(stringResource(renameResource))},
                   onClick={menuOpen=false;action()})
           }
       }

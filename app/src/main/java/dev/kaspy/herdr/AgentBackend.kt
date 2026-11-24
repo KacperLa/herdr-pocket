@@ -118,10 +118,11 @@ internal object TuiAgents {
             fun display(key:String,limit:Int=120):String? = displayText(item.opt(key),limit)
             val provider=display("agent")
             val runner=runnerName(provider)
-            // The TUI Rename dialogs change workspace/tab/pane labels, not the
-            // separately validated agent name. Descriptions are never names.
+            // Agent names and manual pane labels are separate fields on Herdr.
             val location=TuiLocation.from(item,address)
-            val explicitName=labels.paneLabel(item,address) ?: display("name")
+            val registeredName=display("name")
+            val paneLabel=labels.paneLabel(item,address)
+            val explicitName=registeredName ?: paneLabel
             val name=explicitName ?: labels.parentLabel(item) ?: runner?.let {"$it agent"} ?: "Unnamed agent"
             val descriptions=listOf(
                 display("title",480),
@@ -143,10 +144,10 @@ internal object TuiAgents {
             val path=display("cwd",1024) ?: display("foreground_cwd",1024)
             CoreSession(address,name,"live",runner.orEmpty(),display("agent_status"),description,path,location,isAgent=true,
                 rosterPlacement=placement,attentionRecency=reportedSequence(item.opt("state_change_seq")),
-                spacesName=labels.spacesName(location, explicitName, display("title",480) ?: display("terminal_title_stripped",480),
+                spacesName=labels.spacesName(location, paneLabel ?: registeredName, display("title",480) ?: display("terminal_title_stripped",480),
                     provider ?: display("display_agent")),
                 spacesPath=labels.foregroundPath(location) ?: display("foreground_cwd",1024) ?: path,
-                compactDescription=compactDescription)
+                compactDescription=compactDescription,tuiAgentName=registeredName)
         }
         val terminals=(0 until (panes?.length() ?: 0)).mapNotNull { i ->
             val pane=panes?.optJSONObject(i) ?: return@mapNotNull null

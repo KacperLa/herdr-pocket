@@ -714,8 +714,8 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
     private var nextRosterNotice:String?=null
     private var interruptedRosterNotice:String?=null
     private sealed interface TuiRosterWork {
-        data class VerifyRename(val location:TuiLocation,val label:String):TuiRosterWork
-        data class Rename(val location:TuiLocation,val label:String):TuiRosterWork
+        data class VerifyRename(val location:TuiLocation,val label:String,val isAgent:Boolean):TuiRosterWork
+        data class Rename(val location:TuiLocation,val label:String,val isAgent:Boolean):TuiRosterWork
         data class CreateShell(val workspace:TuiWorkspaceChoice?):TuiRosterWork
         data class VerifyNewPane(val location:TuiLocation):TuiRosterWork
     }
@@ -752,8 +752,8 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
     private class AgentSettingsRoute(val pty:Any,val address:String,val target:ResumeTarget)
     private sealed interface AgentSettingsWork {
         data object Read : AgentSettingsWork
-        data class Verify(val location:TuiLocation,val label:String) : AgentSettingsWork
-        data class Rename(val location:TuiLocation,val label:String) : AgentSettingsWork
+        data class Verify(val location:TuiLocation,val label:String,val isAgent:Boolean) : AgentSettingsWork
+        data class Rename(val location:TuiLocation,val label:String,val isAgent:Boolean) : AgentSettingsWork
     }
     private var agentSettingsRoute:AgentSettingsRoute?=null
     private var agentSettingsRequest:Long?=null
@@ -844,23 +844,27 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                 else agentSettingsNotice="Could not read this terminal’s profile. Refresh to try again."
             }
             is AgentSettingsWork.Verify -> {
-                if(!ok || !TuiMutations.confirmsPane(response,work.location)) {
+                if(!ok || !TuiMutations.confirmsRenameTarget(response,work.location,work.isAgent)) {
                     activeAgentDetails=null
-                    agentSettingsNotice="That pane changed. Refresh before renaming."
+                    agentSettingsNotice=TuiMutations.renameRejection(response,event.stderr.toString(Charsets.UTF_8))
+                        ?: "The rename target changed. Refresh before renaming."
                     return
                 }
-                beginAgentSettings(route,AgentSettingsWork.Rename(work.location,work.label),
-                    TuiMutations.renamePane(work.location,work.label,route.target.tuiSession))
+                beginAgentSettings(route,AgentSettingsWork.Rename(work.location,work.label,work.isAgent),
+                    TuiMutations.renameSelection(work.location,work.isAgent,work.label,route.target.tuiSession))
             }
             is AgentSettingsWork.Rename -> {
-                if(ok && TuiMutations.confirmsPane(response,work.location,work.label)) {
+                if(ok && TuiMutations.confirmsRenameTarget(response,work.location,work.isAgent,work.label)) {
                     agentName=work.label
-                    activeAgentDetails=activeAgentDetails?.copy(name=work.label)
+                    activeAgentDetails=activeAgentDetails?.let {
+                        it.copy(name=work.label,tuiAgentName=work.label.takeIf {work.isAgent})
+                    }
                     prefs.edit().putString("agent",work.label).apply()
-                    agentSettingsNotice="Pane renamed."
+                    agentSettingsNotice=if(work.isAgent) "Agent renamed." else "Pane renamed."
                 } else {
                     activeAgentDetails=null
-                    agentSettingsNotice="Could not confirm the rename. Refresh before trying again."
+                    agentSettingsNotice=TuiMutations.renameRejection(response,event.stderr.toString(Charsets.UTF_8))
+                        ?: "Could not confirm the rename. Refresh before trying again."
                 }
             }
             null -> Unit
@@ -877,7 +881,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         activeAgentDetails=null
         agentSettingsNotice=when(work) {
             is AgentSettingsWork.Rename -> "Could not confirm the rename. Refresh before trying again."
-            is AgentSettingsWork.Verify -> "Could not verify the pane. No rename was sent."
+            is AgentSettingsWork.Verify -> "Could not verify the target. No rename was sent."
             else -> "Could not read this terminal’s profile. Refresh to try again."
         }
     }
@@ -1582,20 +1586,22 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         val target=resume?.takeIf {it.backend==AgentBackend.TUI} ?: return
         val selected=renamingAgent ?: return
         val location=selected.tuiLocation ?: return
+        val isAgent=selected.isAgent
+        if(!TuiMutations.canRenameSelection(label,isAgent)) return
         if(agentSettingsOpen) {
             val route=agentSettingsRoute ?: return
             if(!canRenameActiveAgent || selected!==activeAgentDetails || selected.address!=route.address ||
-                location.terminalId!=route.address || !TuiMutations.canRename(label)) return
+                location.terminalId!=route.address) return
             renamingAgent=null
-            beginAgentSettings(route,AgentSettingsWork.Verify(location,label),
-                TuiMutations.inspectPane(location,target.tuiSession))
+            beginAgentSettings(route,AgentSettingsWork.Verify(location,label,isAgent),
+                TuiMutations.inspectRenameTarget(location,isAgent,target.tuiSession))
             return
         }
         if(!showAgentSwitcher || !canSwitchAgents || switchBusy || selected !in switchSessions ||
-            location.terminalId!=selected.address || !TuiMutations.canRename(label)) return
+            location.terminalId!=selected.address) return
         renamingAgent=null
-        beginTuiWork(TuiRosterWork.VerifyRename(location,label),TuiMutations.inspectPane(location,target.tuiSession),
-            "Checking the selected pane…","Could not check the pane. Nothing was changed.")
+        beginTuiWork(TuiRosterWork.VerifyRename(location,label,isAgent),TuiMutations.inspectRenameTarget(location,isAgent,target.tuiSession),
+            "Checking the rename target…","Could not check the target. Nothing was changed.")
     }
 
     private fun beginTuiWork(work:TuiRosterWork,command:String,statusText:String,notSent:String) {
@@ -1614,15 +1620,18 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         val text=event.stdout.toString(Charsets.UTF_8)
         val ok=event.exitStatus==0
         when(work) {
-            is TuiRosterWork.VerifyRename -> if(ok && TuiMutations.confirmsPane(text,work.location)) {
-                beginTuiWork(TuiRosterWork.Rename(work.location,work.label),
-                    TuiMutations.renamePane(work.location,work.label,target.tuiSession),"Renaming only this pane…",
+            is TuiRosterWork.VerifyRename -> if(ok && TuiMutations.confirmsRenameTarget(text,work.location,work.isAgent)) {
+                beginTuiWork(TuiRosterWork.Rename(work.location,work.label,work.isAgent),
+                    TuiMutations.renameSelection(work.location,work.isAgent,work.label,target.tuiSession),
+                    if(work.isAgent) "Renaming the agent in Herdr…" else "Renaming only this pane…",
                     "Could not send the rename. Nothing was changed.")
-            } else switchMessage="That agent moved or its pane is no longer available. Refresh before renaming."
-            is TuiRosterWork.Rename -> if(ok && TuiMutations.confirmsPane(text,work.location,work.label)) {
-                nextRosterNotice="Pane renamed."
+            } else switchMessage=TuiMutations.renameRejection(text,event.stderr.toString(Charsets.UTF_8))
+                ?: "The rename target moved or is no longer available. Refresh before renaming."
+            is TuiRosterWork.Rename -> if(ok && TuiMutations.confirmsRenameTarget(text,work.location,work.isAgent,work.label)) {
+                nextRosterNotice=if(work.isAgent) "Agent renamed." else "Pane renamed."
                 refreshAgents()
-            } else switchMessage="Could not confirm the pane rename. Refresh before trying again."
+            } else switchMessage=TuiMutations.renameRejection(text,event.stderr.toString(Charsets.UTF_8))
+                ?: "Could not confirm the rename. Refresh before trying again."
             is TuiRosterWork.CreateShell -> {
                 val fresh=if(ok) TuiMutations.newShellPane(text,work.workspace?.id) else null
                 if(fresh!=null && fresh.terminalId!=activeCoreAddress &&
@@ -1698,7 +1707,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
 
     private fun clearAgentSwitcher() {
         interruptedRosterNotice=when(tuiWork) {
-            is TuiRosterWork.Rename -> "Connection interrupted during rename. Check the current pane label."
+            is TuiRosterWork.Rename -> "Connection interrupted during rename. Check the name in Herdr."
             is TuiRosterWork.CreateShell -> "Shell creation was interrupted. Check Herdr before trying again."
             is TuiRosterWork.VerifyNewPane -> "A shell was created. Refresh to find it."
             else -> if(coreShellCreate!=null || switchingNewTerminal)
@@ -1878,10 +1887,10 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                     rosterRefresh=rosterRefresh.complete(event.id)
                     switchOperation=null;switchCandidate=null;pendingWatchTerminal=null
                     switchMessage=when(tuiWork) {
-                        is TuiRosterWork.Rename -> "Could not confirm the pane rename. Refresh before trying again."
+                        is TuiRosterWork.Rename -> "Could not confirm the rename. Refresh before trying again."
                         is TuiRosterWork.VerifyNewPane -> "The shell was created but did not open. Refresh to find it."
                         is TuiRosterWork.CreateShell -> "Could not confirm the new shell. Check Herdr before trying again."
-                        is TuiRosterWork.VerifyRename -> "Could not check the pane. No rename was sent."
+                        is TuiRosterWork.VerifyRename -> "Could not check the target. No rename was sent."
                         null -> when {
                             coreShellCreate!=null -> "Could not confirm the new shell. Refresh before trying again."
                             switchingNewTerminal -> "The shell was created but could not open. Your current terminal is unchanged."
@@ -3230,19 +3239,27 @@ private fun SpaceStatusFilter.labelResource(agentsOnly:Boolean):Int = when(this)
 }
 
 @Composable private fun RenameAgentDialog(m:PocketModel,session:CoreSession,agentSettings:Boolean=false) {
-    var label by remember(session.address) {mutableStateOf(session.name)}
+    val isAgent=session.isAgent
+    val existing=if(isAgent) session.tuiAgentName.orEmpty() else session.name
+    var label by remember(session.address,existing) {mutableStateOf(existing)}
+    val action=stringResource(if(isAgent) R.string.roster_row_rename_agent else R.string.roster_row_rename)
     PocketDialog(
         onDismissRequest=m::cancelRename,
-        title={Text(if(agentSettings) stringResource(R.string.agent_settings_edit_name) else "Rename pane")},
+        title={Text(if(agentSettings) stringResource(R.string.agent_settings_edit_name) else action)},
         text={
             Column(verticalArrangement=Arrangement.spacedBy(8.dp)) {
-                Text("This changes only this pane’s label in Herdr. Its tab, workspace and agent ID stay the same.")
-                Field("Pane label",label,{label=it},true)
+                if(isAgent) {
+                    Text("Changes the agent’s name in Herdr, not its pane, tab or workspace.")
+                    Text("Use 1–32 lowercase letters, digits, hyphens or underscores. Start with a letter.")
+                } else Text("This changes only this terminal pane’s label in Herdr.")
+                Field(if(isAgent) "Agent name" else "Pane label",label,{label=it},true)
             }
         },
         confirmButton={
             TextButton(onClick={m.renameAgent(label.trim())},
-                enabled=TuiMutations.canRename(label.trim()) && label.trim()!=session.name) {Text(if(agentSettings) stringResource(R.string.agent_settings_save_name) else "Rename pane")}
+                enabled=TuiMutations.canRenameSelection(label.trim(),isAgent) && label.trim()!=existing) {
+                Text(if(agentSettings) stringResource(R.string.agent_settings_save_name) else action)
+            }
         },
         dismissButton={TextButton(onClick=m::cancelRename){Text("Cancel")}},
     )

@@ -64,6 +64,40 @@ internal object TuiMutations {
             (expectedLabel==null || pane.opt("label")==expectedLabel)
     }.getOrDefault(false)
 
+    fun canRenameSelection(label:String,isAgent:Boolean)=if(isAgent) canStart(label) else canRename(label)
+
+    fun inspectRenameTarget(location:TuiLocation,isAgent:Boolean,session:String?):String =
+        if(isAgent) TuiAgents.resolve("agent get "+quotedId(location.paneId),session) else inspectPane(location,session)
+
+    fun renameSelection(location:TuiLocation,isAgent:Boolean,label:String,session:String?):String {
+        if(!isAgent) return renamePane(location,label,session)
+        require(canRenameSelection(label,true))
+        return TuiAgents.resolve("agent rename "+quotedId(location.paneId)+" "+TuiAgents.quote(label),session)
+    }
+
+    fun confirmsRenameTarget(json:String,location:TuiLocation,isAgent:Boolean,expectedLabel:String?=null):Boolean {
+        if(!isAgent) return confirmsPane(json,location,expectedLabel)
+        return runCatching {
+            val agent=result(json,"agent_info")?.optJSONObject("agent") ?: return false
+            TuiLocation.from(agent,location.terminalId)==location && !agent.optBoolean("launch_pending") &&
+                (expectedLabel==null || agent.opt("name")==expectedLabel)
+        }.getOrDefault(false)
+    }
+
+    fun renameRejection(vararg responses:String):String? {
+        val codes=responses.mapNotNull { json ->
+            runCatching { JSONObject(json).optJSONObject("error")?.opt("code") as? String }.getOrNull()
+        }
+        return when {
+            "agent_name_taken" in codes -> "That agent name is already in use in Herdr."
+            "agent_launch_pending" in codes -> "This agent is still starting. Try again when it is ready."
+            "agent_not_found" in codes || "pane_not_found" in codes ->
+                "The target is no longer available. Refresh before renaming."
+            "invalid_agent_name" in codes -> "Herdr rejected the agent name. Use 1–32 lowercase letters, digits, hyphens or underscores, starting with a letter."
+            else -> null
+        }
+    }
+
     fun createTab(workspaceId:String,name:String,session:String?):String {
         require(canStart(name))
         return TuiAgents.resolve("tab create --workspace "+quotedId(workspaceId)+

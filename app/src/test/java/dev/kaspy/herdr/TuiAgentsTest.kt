@@ -13,7 +13,7 @@ class TuiAgentsTest {
           {"terminal_id":"term_def","launch_pending":true}
         ]}}"""
         assertEquals(
-            listOf(CoreSession("term_abc","reviewer","live","Codex","working"),
+            listOf(CoreSession("term_abc","reviewer","live","Codex","working",tuiAgentName="reviewer"),
                 CoreSession("term_bcd","Unnamed agent","live","","unknown",description="second",isAgent=true)),
             TuiAgents.parse(json),
         )
@@ -221,8 +221,11 @@ class TuiAgentsTest {
           ]
         }}}"""
         val roster=TuiAgents.parse(payload)
-        assertEquals(listOf("Pane alias","Research agent","Release console","Jetson AI","Codex agent","8","Codex agent"),
+        assertEquals(listOf("explicit_name","Research agent","Release console","Jetson AI","Codex agent","8","Codex agent"),
             roster.filter {it.isAgent}.map {it.name})
+        assertEquals("explicit_name",roster.first().tuiAgentName)
+        assertNull(roster[1].tuiAgentName)
+        assertTrue(roster.first().spacesName.orEmpty().contains("Pane alias"))
         assertEquals("stale_terminal",roster.single {!it.isAgent}.address)
         assertEquals("Long task",roster[1].description)
         assertEquals("Codex · /home/example/src",TuiAgents.runnerAndPath(roster[3]))

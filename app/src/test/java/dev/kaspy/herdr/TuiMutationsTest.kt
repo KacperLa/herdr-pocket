@@ -21,6 +21,32 @@ class TuiMutationsTest {
         assertFalse(TuiMutations.confirmsPane("not JSON",loc))
     }
 
+    @Test fun agentRenameRequiresTheExactAgentNameFieldAndRoute() {
+        val renamed=response("agent_info","agent","""{$fields,"name":"release-reviewer","agent":"codex"}""")
+        assertTrue(TuiMutations.confirmsRenameTarget(renamed,loc,true))
+        assertTrue(TuiMutations.confirmsRenameTarget(renamed,loc,true,"release-reviewer"))
+        assertFalse(TuiMutations.confirmsRenameTarget(renamed,loc,true,"old-name"))
+        for(wrong in listOf(loc.copy(terminalId="different"),loc.copy(paneId="w1:p3"),
+            loc.copy(tabId="w1:t8"),loc.copy(workspaceId="w8"))) {
+            assertFalse(TuiMutations.confirmsRenameTarget(renamed,wrong,true,"release-reviewer"))
+        }
+        val pane=response("pane_info","pane","""{$fields,"label":"release-reviewer"}""")
+        assertFalse(TuiMutations.confirmsRenameTarget(pane,loc,true,"release-reviewer"))
+        assertTrue(TuiMutations.confirmsRenameTarget(pane,loc,false,"release-reviewer"))
+        assertFalse(TuiMutations.confirmsRenameTarget(renamed.replaceFirst("name","label"),loc,true,"release-reviewer"))
+        assertFalse(TuiMutations.confirmsRenameTarget(renamed.replaceFirst("agent\":\"codex", "launch_pending\":true,\"agent\":\"codex"),loc,true))
+        assertEquals("That agent name is already in use in Herdr.",
+            TuiMutations.renameRejection("", """{"error":{"code":"agent_name_taken","message":"details"}}"""))
+        assertNull(TuiMutations.renameRejection("no matching error"))
+        assertTrue(TuiMutations.canRenameSelection("release-reviewer_2",true))
+        assertFalse(TuiMutations.canRenameSelection("Release Reviewer",true))
+        assertTrue(TuiMutations.canRenameSelection("Release Reviewer",false))
+        for(bad in listOf("", "1agent", "--clear", "Upper", "x;id", "a".repeat(33))) {
+            assertFalse(TuiMutations.canRenameSelection(bad,true))
+            assertTrue(runCatching {TuiMutations.renameSelection(loc,true,bad,null)}.isFailure)
+        }
+    }
+
     @Test fun creationUsesExactReturnedNewPaneAndAgentAndOnlySupportedVersion() {
         val created="""{"result":{"type":"workspace_created","workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t3","workspace_id":"w1"},"root_pane":{$fields}}}"""
         assertEquals(loc,TuiMutations.newShellPane(created,null))
@@ -86,6 +112,12 @@ class TuiMutationsTest {
                 run(AgentBackend.TUI.switchCommand(loc.terminalId,"work.local")))
             val label="Jetson's AI; \$(printf EXTRA)"
             val scope=listOf("--session","work.local")
+            assertEquals(scope+listOf("agent","get","w1:p2"),
+                run(TuiMutations.inspectRenameTarget(loc,true,"work.local")))
+            assertEquals(scope+listOf("agent","rename","w1:p2","release-reviewer"),
+                run(TuiMutations.renameSelection(loc,true,"release-reviewer","work.local")))
+            assertEquals(scope+listOf("pane","rename","w1:p2",label),
+                run(TuiMutations.renameSelection(loc,false,label,"work.local")))
             assertEquals(scope+listOf("pane","get","w1:p2"),run(TuiMutations.inspectPane(loc,"work.local")))
             assertEquals(scope+listOf("pane","rename","w1:p2",label),run(TuiMutations.renamePane(loc,label,"work.local")))
             assertEquals(scope+listOf("tab","create","--workspace","w1","--label","jetson","--no-focus"),

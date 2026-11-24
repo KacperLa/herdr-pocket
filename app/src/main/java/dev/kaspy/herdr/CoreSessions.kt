@@ -17,6 +17,7 @@ data class CoreSession(
     val spacesName:String?=null,
     val spacesPath:String?=null,
     val compactDescription:String?=description,
+    val tuiAgentName:String?=null,
 )
 object CoreSessions {
     private val knownAgentNames=setOf("codex","claude","claude-code","opencode","pi","gemini","copilot","aider","amp","cursor","cursor-agent")
