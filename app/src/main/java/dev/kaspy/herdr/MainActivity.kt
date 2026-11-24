@@ -2801,7 +2801,10 @@ private data class PendingTerminalLink(val target:TerminalWebLink,val route:Remo
             ) {
                 RoundBackArrow("Open agents",m::openAgentSwitcher,headerSize)
                 Box(Modifier.weight(1f)) {
-                    Surface(shape=CircleShape,color=MaterialTheme.colorScheme.surfaceVariant) {
+                    Surface(
+                        shape=CircleShape,color=PocketBlack,contentColor=PocketInk,
+                        border=BorderStroke(1.dp,PocketOutline),
+                    ) {
                         Box(Modifier.height(headerSize),contentAlignment=androidx.compose.ui.Alignment.Center) {
                             Text(m.agentName.ifBlank{"Agent"},fontSize=20.sp,lineHeight=24.sp,
                                 modifier=Modifier.padding(horizontal=15.dp),maxLines=1,overflow=TextOverflow.Ellipsis)
