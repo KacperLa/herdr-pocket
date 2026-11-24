@@ -5,6 +5,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.ContentResolver
+import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
@@ -38,7 +39,6 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.BasicTextField
@@ -372,6 +372,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         }
     }
     fun cancelPicker() {
+        clearRosterWatchLease()
         if(showSessionPicker) clearAgentSwitcher()
         pendingColdWatchTerminal=null
         showSessionPicker=false
@@ -391,6 +392,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         pendingColdWatchTerminal=null
         val selection=explicitRosterSelection(sessions,watchTarget,preferred)
         if(selection!=null) {
+            clearRosterWatchLease()
             connect(attach=selection,automatic=automatic,backend=backend,tuiSessionName=listedTuiSession,
                 keepRetainedTerminal=retainedTerminal)
         } else {
@@ -407,6 +409,11 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                 else -> ""
             }
             status="Choose a live ${backend.label} session."
+            val lease=pendingRosterWatchLease
+            pendingRosterWatchLease=null
+            if(lease!=null && lease.config==listedConfig && lease.session==listedTuiSession && backend==AgentBackend.TUI)
+                rosterWatchLease=lease
+            else lease?.wipe()
         }
     }
     private var listedConfig:SshConfig?=null
@@ -517,7 +524,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         emulator.writeInput(bytes)
     }
     private var generation=0L
-    private data class ResumeTarget(val config:SshConfig,val key:ByteArray,val passphrase:ByteArray?,var command:String,var address:String,val backend:AgentBackend,val tuiSession:String?,var retries:Int=0) {
+    private class ResumeTarget(val config:SshConfig,val key:ByteArray,val passphrase:ByteArray?,var command:String,var address:String,val backend:AgentBackend,val tuiSession:String?,var retries:Int=0) {
         fun clear() {key.fill(0);passphrase?.fill(0)}
     }
     private val agentPins=AgentPins(
@@ -564,40 +571,79 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         private set
     private var pendingWatchTerminal:AgentWatchAlertTarget?=null
     private var pendingColdWatchTerminal:String?=null
-    private var watchPermissionScope:AgentWatchScope?=null
-    internal val canStartAgentWatch get()=canSwitchAgents && activeWatchScope()!=null
+    private class RosterWatchLease(
+        val config:SshConfig,val session:String?,val key:ByteArray,val passphrase:ByteArray?,
+    ) {
+        fun wipe() {key.fill(0);passphrase?.fill(0)}
+    }
+    private var pendingRosterWatchLease:RosterWatchLease?=null
+    private var rosterWatchLease by mutableStateOf<RosterWatchLease?>(null)
+    private var authenticatedWatchTerminal by mutableStateOf<ResumeTarget?>(null)
+    private val watchStartGate=AgentWatchStartGate()
+    internal var notificationsEnabled by mutableStateOf(prefs.getBoolean(AGENT_NOTIFICATIONS_ENABLED,false))
+        private set
+    private val notificationPrefListener=SharedPreferences.OnSharedPreferenceChangeListener { preferences,key ->
+        if(key==AGENT_NOTIFICATIONS_ENABLED) {
+            notificationsEnabled=preferences.getBoolean(AGENT_NOTIFICATIONS_ENABLED,false)
+            if(!notificationsEnabled) watchStartGate.reset()
+        }
+    }
+    init {prefs.registerOnSharedPreferenceChangeListener(notificationPrefListener)}
+
+    private fun clearRosterWatchLease() {
+        pendingRosterWatchLease?.wipe();pendingRosterWatchLease=null
+        rosterWatchLease?.wipe();rosterWatchLease=null
+    }
+
+    private fun watchProfileMatches(config:SshConfig,session:String?):Boolean {
+        val endpoint=selectedEndpoint ?: return false
+        // Never run from a lease for stale settings, a different account, or an unpinned route.
+        return config.host==endpoint.host && config.port==endpoint.port && config.user==user.trim() &&
+            config.expectedPin?.let(::isSshSha256Pin)==true && config.expectedPin==storedPin &&
+            normalizedWatchSession(session)==normalizedWatchSession(tuiSession)
+    }
+
+    internal val watchLeaseToken:Any?
+        get() = authenticatedWatchTerminal?.takeIf {
+            canSwitchAgents && displayedPty!=null && ssh.terminalIdentity()===displayedPty &&
+                it.backend==AgentBackend.TUI && watchProfileMatches(it.config,it.tuiSession)
+        } ?: rosterWatchLease?.takeIf {showSessionPicker && watchProfileMatches(it.config,it.session)}
+
     private fun activeWatchScope():AgentWatchScope? = resume?.takeIf {
         it.backend==AgentBackend.TUI && isSshSha256Pin(it.config.expectedPin.orEmpty())
     }?.let {AgentWatchScope(it.config,normalizedWatchSession(it.tuiSession))}
 
     internal fun clearWatchNotice() {watchNotice=null}
+    internal fun resetWatchStartGate() = watchStartGate.reset()
 
-    internal fun prepareAgentWatchPermission():Boolean {
-        watchPermissionScope=activeWatchScope().takeIf {canStartAgentWatch}
-        return watchPermissionScope!=null
-    }
-
-    internal fun finishAgentWatchPermission(activity:MainActivity,granted:Boolean) {
-        val expected=watchPermissionScope
-        watchPermissionScope=null
-        if(!granted) notificationPermissionDeclined()
-        else if(expected!=null && expected==activeWatchScope()) startAgentWatch(activity)
-        else watchNotice="The Herdr connection changed. Turn on agent alerts again from the new connection."
-    }
-
-    internal fun startAgentWatch(activity:MainActivity) {
-        val target=resume
-        if(target==null || !canStartAgentWatch) {
-            watchNotice="Connect to a Herdr TUI terminal before turning on agent alerts."
-            return
+    internal fun setNotificationsEnabled(enabled:Boolean) {
+        notificationsEnabled=enabled
+        prefs.edit().putBoolean(AGENT_NOTIFICATIONS_ENABLED,enabled).apply()
+        if(!enabled) {
+            watchStartGate.reset()
+            AgentWatchService.stop(getApplication<Application>())
         }
-        watchNotice=if(AgentWatchService.startFromVisible(activity,target.config,target.tuiSession,target.key,target.passphrase)) null
-            else "Could not start agent alerts. Check that Pocket notifications are allowed."
     }
 
-    internal fun notificationPermissionDeclined() {
-        watchNotice="Allow Pocket notifications to turn on agent alerts."
+    internal fun maybeStartAgentWatch(activity:MainActivity) {
+        if(!notificationsEnabled || !AgentWatchService.canNotify(activity)) return
+        val lease=watchLeaseToken ?: return
+        val (config,session,key,passphrase)=when(lease) {
+            is ResumeTarget -> WatchCredentials(lease.config,lease.tuiSession,lease.key,lease.passphrase)
+            is RosterWatchLease -> WatchCredentials(lease.config,lease.session,lease.key,lease.passphrase)
+            else -> return
+        }
+        val active=AgentWatchService.state.value as? AgentWatchServiceState.Active
+        val scope=AgentWatchScope(config,normalizedWatchSession(session))
+        if(!watchStartGate.claim(lease)) return
+        if(active?.scope==scope) return
+        if(active!=null) AgentWatchService.stop(activity)
+        AgentWatchService.startFromVisible(activity,config,session,key,passphrase)
     }
+
+    private data class WatchCredentials(
+        val config:SshConfig,val session:String?,val key:ByteArray,val passphrase:ByteArray?,
+    )
 
     internal fun expiredWatchAlert() {
         noteManualConnectionAction()
@@ -1690,8 +1736,10 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
     }
 
     private var resume:ResumeTarget?=null
-    private fun clearResume() {dismissAgentMenu();resume?.clear();resume=null;activeCoreAddress=null;displayedPty=null;terminalMouse.reset();clearAgentSwitcher()}
+    private fun clearResume() {dismissAgentMenu();authenticatedWatchTerminal=null;watchStartGate.reset();resume?.clear();resume=null;activeCoreAddress=null;displayedPty=null;terminalMouse.reset();clearAgentSwitcher()}
     private fun reattachAfterLoss() {
+        authenticatedWatchTerminal=null
+        watchStartGate.reset()
         suspendCurrentTerminal()
         if(finishStartup()) {
             busy=false;terminalVisible=false;clearResume()
@@ -1753,6 +1801,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                             terminalVisible=!startupInFlight
                         }
                         activeCoreAddress=resume?.address
+                        authenticatedWatchTerminal=resume?.takeIf {displayedPty!=null && it.backend==AgentBackend.TUI}
                         attachStarted=true
                         scheduleRemember(token)
                     }
@@ -1841,7 +1890,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                     val probe=probeContext
                     finishStartup()
                     clearPendingSave();probeContext=null
-                    clearResume();rememberCandidate=null;listing=false;observedPin=event.actual;busy=false
+                    clearRosterWatchLease();clearResume();rememberCandidate=null;listing=false;observedPin=event.actual;busy=false
                     if(probe==null) passphrase=""
                     if(probe!=null && probe.generation==generation && probe.endpoint==selectedEndpoint) {
                         val expected=hostTrust.pin(probe.endpoint)
@@ -1972,6 +2021,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         if(!keepRetainedTerminal) retainedTerminal=false
         clearRetainedOutput()
         val coldRows=switchSessions.takeIf {keepColdRoster && showSessionPicker && list && !checking}
+        clearRosterWatchLease()
         clearResume()
         showSessionPicker=coldRows!=null
         if(coldRows!=null) {
@@ -2044,6 +2094,9 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                 if(wantsSave && scope!=null) pendingSave=PendingSave(scope,secret.copyOf())
                 if(attach!=null) resume=ResumeTarget(cfg,key.copyOf(),credential?.copyOf(),cmd,attach.address,backend,namedSession)
                 checkNotNull(ssh.connect(cfg,key,credential,cmd,cols,rows,pty=!list))
+                // The callback is posted to main. Promote this pending lease only after a successful roster response.
+                if(listing && backend==AgentBackend.TUI && expected?.let(::isSshSha256Pin)==true)
+                    pendingRosterWatchLease=RosterWatchLease(cfg,namedSession,key.copyOf(),credential?.copyOf())
             } catch(e:Exception) {
                 if(request==generation) {
                     finishStartup()
@@ -2125,23 +2178,49 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         val payload=Base64.encodeToString(out.toByteArray(),Base64.NO_WRAP)
         emulator.writeInput(("\u001b_Ga=T,f=100,t=d,i=42,c=24,r=5;"+payload+"\u001b\\\r\n\r\nLocal PNG sent through Kitty escape bytes.\r\nPinch text to zoom; rotate or unfold to resize.\r\nThis is not a remote Herdr session.\r\n").toByteArray())
     }
-    override fun onCleared() {clearRetainedOutput();finishStartup();clearPendingSave();clearResume();ssh.close();emulator.close();retiredEmulators.forEach { it.close() };retiredEmulators.clear();passphrase=""}
+    override fun onCleared() {prefs.unregisterOnSharedPreferenceChangeListener(notificationPrefListener);clearRosterWatchLease();clearRetainedOutput();finishStartup();clearPendingSave();clearResume();ssh.close();emulator.close();retiredEmulators.forEach { it.close() };retiredEmulators.clear();passphrase=""}
 }
 
 class MainActivity : ComponentActivity() {
     private lateinit var model:PocketModel
-    private val alertPermission=registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        model.finishAgentWatchPermission(this,granted)
+    private var watchUiVisible by mutableStateOf(false)
+    private var watchOsAllowed by mutableStateOf(false)
+    private var previousWatchPermission:Boolean?=null
+    private val alertPermission=registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        refreshWatchPermission()
     }
-    private fun enableAgentWatch() {
-        if(checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)!=android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            if(model.prepareAgentWatchPermission()) alertPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
-        } else if(!AgentWatchService.canNotify(this)) {
-            runCatching {startActivity(Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE,packageName))}
-            model.notificationPermissionDeclined()
-        } else model.startAgentWatch(this)
+
+    private fun refreshWatchPermission() {
+        val allowed=AgentWatchService.canNotify(this)
+        if(previousWatchPermission?.let {it!=allowed}==true) model.resetWatchStartGate()
+        previousWatchPermission=allowed
+        watchOsAllowed=allowed
     }
+
+    private fun setAgentNotifications(enabled:Boolean) {
+        model.setNotificationsEnabled(enabled)
+        if(!enabled) return
+        refreshWatchPermission()
+        if(checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)!=android.content.pm.PackageManager.PERMISSION_GRANTED)
+            alertPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+    }
+
+    private fun openAndroidNotificationSettings() {
+        runCatching {startActivity(Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+            .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE,packageName))}
+    }
+
+    override fun onResume() {
+        super.onResume()
+        refreshWatchPermission()
+        watchUiVisible=true
+    }
+
+    override fun onPause() {
+        watchUiVisible=false
+        super.onPause()
+    }
+
     private fun handleAgentAlert(intent:Intent?) {
         if(!AgentWatchService.isAlertIntent(intent)) return
         val target=AgentWatchService.takeAlert(intent)
@@ -2170,11 +2249,16 @@ class MainActivity : ComponentActivity() {
         handleAgentAlert(intent)
         setContent {
             LaunchedEffect(model) { model.tryStartupReconnect() }
-            MaterialTheme(colorScheme=darkColorScheme(background=Color.Black,surface=Color.Black)) {
+            val lease=model.watchLeaseToken
+            LaunchedEffect(lease,model.notificationsEnabled,watchUiVisible,watchOsAllowed) {
+                if(lease!=null && watchUiVisible && watchOsAllowed) model.maybeStartAgentWatch(this@MainActivity)
+            }
+            MaterialTheme(colorScheme=PocketColorScheme) {
                 Surface(Modifier.fillMaxSize()) {
                     PocketScreen(model,
-                        enableAgentWatch=::enableAgentWatch,
-                        stopAgentWatch={AgentWatchService.stop(this)},
+                        notificationsAllowed=watchOsAllowed,
+                        setAgentNotifications=::setAgentNotifications,
+                        openAndroidNotificationSettings=::openAndroidNotificationSettings,
                         chooseKey={model.noteManualConnectionAction();keyPicker.launch(arrayOf("*/*"))},
                         uploadFile={
                             model.startProtectedFileUpload(this) {uploadPicker.launch(arrayOf("*/*"))}
@@ -2190,14 +2274,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
-@Composable private fun PocketScreen(m:PocketModel,enableAgentWatch:()->Unit,stopAgentWatch:()->Unit,
-    chooseKey:()->Unit,saveFile:()->Unit,uploadFile:()->Unit) {
+@Composable private fun PocketScreen(m:PocketModel,notificationsAllowed:Boolean,
+    setAgentNotifications:(Boolean)->Unit,openAndroidNotificationSettings:()->Unit,chooseKey:()->Unit,saveFile:()->Unit,uploadFile:()->Unit) {
  var rosterView by rememberSaveable { mutableStateOf(AgentRosterView.AGENTS) }
  val agentsScroll=rememberLazyListState()
  val spacesScroll=rememberLazyListState()
 
  m.offeredTrust?.let { offer ->
-    AlertDialog(
+    PocketDialog(
       onDismissRequest={m.rejectHost()},
       title={Text("Trust this SSH host?")},
       text={
@@ -2213,12 +2297,12 @@ class MainActivity : ComponentActivity() {
  }
 
  if(m.filesUploadNotice==null) m.watchNotice?.let { notice ->
-    AlertDialog(onDismissRequest=m::clearWatchNotice,title={Text("Agent alerts")},
+    PocketDialog(onDismissRequest=m::clearWatchNotice,title={Text("Agent alerts")},
         text={Text(notice)},confirmButton={TextButton(onClick=m::clearWatchNotice){Text("OK")}})
  }
 
  m.filesUploadNotice?.let { notice ->
-    AlertDialog(onDismissRequest=m::clearFilesUploadNotice,title={Text(stringResource(R.string.agent_files_upload_title))},
+    PocketDialog(onDismissRequest=m::clearFilesUploadNotice,title={Text(stringResource(R.string.agent_files_upload_title))},
         text={Text(stringResource(when(notice) {
             FilesUploadInterruption.CONNECTION_LOST_BEFORE_TRANSFER -> R.string.agent_files_upload_connection_lost_before
             FilesUploadInterruption.CONNECTION_LOST_DURING_TRANSFER -> R.string.agent_files_upload_connection_lost_during
@@ -2252,15 +2336,16 @@ class MainActivity : ComponentActivity() {
     }
     return
  }
- ConnectionSettingsScreen(m,chooseKey,enableAgentWatch,stopAgentWatch)
+ ConnectionSettingsScreen(m,chooseKey,notificationsAllowed,setAgentNotifications,openAndroidNotificationSettings)
 }
 
 @Composable
 private fun ConnectionSettingsScreen(
     m:PocketModel,
     chooseKey:()->Unit,
-    enableAgentWatch:()->Unit,
-    stopAgentWatch:()->Unit,
+    notificationsAllowed:Boolean,
+    setAgentNotifications:(Boolean)->Unit,
+    openAndroidNotificationSettings:()->Unit,
 ) {
     val theme=MaterialTheme.colorScheme
     val destination=m.connectionBackDestination
@@ -2297,8 +2382,8 @@ private fun ConnectionSettingsScreen(
             ConnectionSection(R.string.connection_host_section) {
                 Field("Host or IP address",m.host,{m.host=it},!m.busy)
                 Field("SSH username",m.user,{m.user=it},!m.busy)
-                Button(onClick={m.connect(list=true,backend=AgentBackend.TUI)},enabled=!m.busy,
-                    modifier=Modifier.fillMaxWidth()) {Text("Connect to Herdr TUI",fontSize=18.sp)}
+                OutlinedButton(onClick={m.connect(list=true,backend=AgentBackend.TUI)},enabled=!m.busy,
+                    modifier=Modifier.fillMaxWidth(),border=BorderStroke(2.dp,if(m.busy) PocketDisabledInk else PocketInk)) {Text("Connect to Herdr TUI",fontSize=18.sp)}
                 OutlinedButton(onClick={m.connect(list=true,backend=AgentBackend.CORE)},enabled=!m.busy,
                     modifier=Modifier.fillMaxWidth()) {Text("Connect to Herdr Core")}
             }
@@ -2345,7 +2430,8 @@ private fun ConnectionSettingsScreen(
                 OutlinedButton(onClick={m.connect(probe=true)},enabled=!m.busy) {Text("Check host fingerprint")}
             }
             ConnectionSection(R.string.connection_alerts_section) {
-                AgentWatchSettings(m.canStartAgentWatch,enableAgentWatch,stopAgentWatch)
+                AgentWatchSettings(m.notificationsEnabled,notificationsAllowed,m.watchLeaseToken!=null,
+                    setAgentNotifications,openAndroidNotificationSettings)
             }
             ConnectionSection(R.string.connection_advanced_section) {
                 TextButton(onClick={advanced=!advanced}) {
@@ -2377,8 +2463,8 @@ private fun ConnectionSettingsScreen(
 @Composable
 private fun ConnectionSection(title:Int,content:@Composable androidx.compose.foundation.layout.ColumnScope.()->Unit) {
     Surface(
-        modifier=Modifier.fillMaxWidth(),shape=RoundedCornerShape(16.dp),
-        color=MaterialTheme.colorScheme.surfaceVariant.copy(alpha=0.45f),
+        modifier=Modifier.fillMaxWidth(),shape=PocketPanelShape,
+        color=PocketBlack,border=BorderStroke(1.dp,PocketOutline),
     ) {
         Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
             Text(stringResource(title),style=MaterialTheme.typography.titleMedium,
@@ -2643,7 +2729,7 @@ private data class PendingTerminalLink(val target:TerminalWebLink,val route:Remo
             onLocalScrollAvailable={localScroll=it})
     }
     pendingLink?.let { pending ->
-        AlertDialog(
+        PocketDialog(
             onDismissRequest={pendingLink=null},
             title={Text(stringResource(R.string.terminal_link_confirm))},
             text={
@@ -2739,31 +2825,12 @@ private data class PendingTerminalLink(val target:TerminalWebLink,val route:Remo
     }
 }
 
-private val HeaderControlSize=48.dp
-private val HeaderControlFill=Color(0xFF515151)
-private val HeaderControlInk=Color.White
-
-@Composable private fun RoundHeaderButton(
-    label:String,onClick:()->Unit,diameter:Dp=HeaderControlSize,enabled:Boolean=true,modifier:Modifier=Modifier,
-    emphasized:Boolean=false,
-    content:@Composable (Color)->Unit,
-) {
-    val color=if(enabled) HeaderControlInk else HeaderControlInk.copy(alpha=0.38f)
-    Surface(
-        onClick=onClick,enabled=enabled,shape=CircleShape,color=HeaderControlFill,
-        contentColor=color,border=BorderStroke(if(emphasized) 2.dp else 1.dp,color),
-        modifier=modifier.size(diameter).semantics {contentDescription=label;role=Role.Button},
-    ) {
-        Box(contentAlignment=androidx.compose.ui.Alignment.Center) { content(color) }
-    }
-}
-
 @Composable internal fun RoundBackArrow(label:String,onClick:()->Unit,diameter:Dp,modifier:Modifier=Modifier) {
-    RoundHeaderButton(label,onClick,diameter,modifier=modifier) { color ->
+    PocketIconControl(label,onClick,diameter,modifier=modifier) { color ->
         Canvas(Modifier.size(24.dp)) {
             val center=size.height/2
             val left=Offset(size.width*0.22f,center)
-            val width=2.2.dp.toPx()
+            val width=PocketGlyphStroke.toPx()
             drawLine(color,left,Offset(size.width*0.78f,center),width,StrokeCap.Round)
             drawLine(color,left,Offset(size.width*0.48f,size.height*0.24f),width,StrokeCap.Round)
             drawLine(color,left,Offset(size.width*0.48f,size.height*0.76f),width,StrokeCap.Round)
@@ -2904,7 +2971,7 @@ internal val pinnedStripArrangement = Arrangement.spacedBy(8.dp, Alignment.Cente
                 verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,
                 horizontalArrangement=Arrangement.spacedBy(6.dp),
             ) {
-                RoundHeaderButton(
+                PocketIconControl(
                     label=stringResource(R.string.connection_settings),
                     onClick=m::connectionFromAgents,
                     enabled=!m.switchBusy,
@@ -2917,14 +2984,14 @@ internal val pinnedStripArrangement = Arrangement.spacedBy(8.dp, Alignment.Cente
                 Box(Modifier.weight(1f),contentAlignment=Alignment.Center) {
                     AgentRosterViewSwitch(rosterView,onRosterViewChange)
                 }
-                if(m.canCreateAgent) RoundHeaderButton(
+                if(m.canCreateAgent) PocketIconControl(
                     label=stringResource(R.string.agent_roster_new_terminal),
                     onClick=m::createPlainTerminal,enabled=!m.switchBusy,
                 ) { ink ->
                     Canvas(Modifier.size(24.dp)) {
                         val center=size.width/2
                         val edge=size.width*.22f
-                        val stroke=2.2.dp.toPx()
+                        val stroke=PocketGlyphStroke.toPx()
                         drawLine(ink,Offset(edge,center),Offset(size.width-edge,center),stroke,StrokeCap.Round)
                         drawLine(ink,Offset(center,edge),Offset(center,size.height-edge),stroke,StrokeCap.Round)
                     }
@@ -2933,7 +3000,7 @@ internal val pinnedStripArrangement = Arrangement.spacedBy(8.dp, Alignment.Cente
             if(notice!=null) {
                 Surface(
                     modifier=Modifier.fillMaxWidth().onSizeChanged {noticePx=it.height},
-                    color=theme.surface.copy(alpha=0.96f),
+                    color=theme.surface,
                 ) {
                     Text(notice,fontSize=16.sp,modifier=Modifier.padding(horizontal=16.dp,vertical=8.dp)
                         .semantics {liveRegion=LiveRegionMode.Polite})
@@ -2998,31 +3065,31 @@ private fun LazyListScope.rosterRows(m:PocketModel,rows:List<CoreSession>,spaces
 ) {
     var searchFocused by remember {mutableStateOf(false)}
     val searchLabel=stringResource(R.string.agent_roster_search)
-    val searchText=MaterialTheme.typography.bodyLarge.copy(color=HeaderControlInk)
+    val searchText=MaterialTheme.typography.bodyLarge.copy(color=PocketInk)
     Row(
         modifier,
         horizontalArrangement=Arrangement.spacedBy(4.dp),
         verticalAlignment=Alignment.CenterVertically,
     ) {
         Surface(
-            modifier=Modifier.weight(1f),shape=CircleShape,color=HeaderControlFill,
-            contentColor=HeaderControlInk,border=BorderStroke(if(searchFocused) 2.dp else 1.dp,HeaderControlInk),
+            modifier=Modifier.weight(1f),shape=CircleShape,color=PocketBlack,
+            contentColor=PocketInk,border=BorderStroke(if(searchFocused) 2.dp else 1.dp,PocketOutline),
         ) {
             Row(
-                modifier=Modifier.heightIn(min=HeaderControlSize),
+                modifier=Modifier.heightIn(min=PocketControlSize),
                 verticalAlignment=Alignment.CenterVertically,
             ) {
                 BasicTextField(
                     value=query,onValueChange=onQueryChange,singleLine=true,
                     keyboardOptions=KeyboardOptions(imeAction=ImeAction.Search),
                     keyboardActions=KeyboardActions(onSearch={onSearch()}),
-                    textStyle=searchText,cursorBrush=SolidColor(HeaderControlInk),
+                    textStyle=searchText,cursorBrush=SolidColor(PocketInk),
                     modifier=Modifier.weight(1f)
                         .onFocusChanged {searchFocused=it.isFocused}
                         .semantics {contentDescription=searchLabel},
                     decorationBox={ input ->
                         Box(
-                            Modifier.fillMaxWidth().heightIn(min=HeaderControlSize).padding(
+                            Modifier.fillMaxWidth().heightIn(min=PocketControlSize).padding(
                                 start=14.dp,end=if(query.isEmpty()) 14.dp else 2.dp,
                                 top=5.dp,bottom=5.dp,
                             ),
@@ -3030,7 +3097,7 @@ private fun LazyListScope.rosterRows(m:PocketModel,rows:List<CoreSession>,spaces
                         ) {
                             if(query.isEmpty()) Text(
                                 stringResource(R.string.agent_roster_search_hint),
-                                style=searchText,color=HeaderControlInk.copy(alpha=.82f),
+                                style=searchText,color=PocketInk.copy(alpha=.82f),
                                 maxLines=1,overflow=TextOverflow.Ellipsis,
                             )
                             input()
@@ -3039,14 +3106,13 @@ private fun LazyListScope.rosterRows(m:PocketModel,rows:List<CoreSession>,spaces
                 )
                 if(query.isNotEmpty()) {
                     val label=stringResource(R.string.agent_roster_clear_search)
-                    IconButton(onClick={onQueryChange("")},
-                        modifier=Modifier.size(HeaderControlSize).semantics {contentDescription=label}) {
-                        Canvas(Modifier.size(22.dp)) {
-                            val stroke=2.dp.toPx()
+                    PocketIconControl(label=label,onClick={onQueryChange("")}) { ink ->
+                        Canvas(Modifier.size(PocketGlyphSize)) {
+                            val stroke=PocketGlyphStroke.toPx()
                             val first=size.width*.28f
                             val last=size.width*.72f
-                            drawLine(HeaderControlInk,Offset(first,first),Offset(last,last),stroke,StrokeCap.Round)
-                            drawLine(HeaderControlInk,Offset(first,last),Offset(last,first),stroke,StrokeCap.Round)
+                            drawLine(ink,Offset(first,first),Offset(last,last),stroke,StrokeCap.Round)
+                            drawLine(ink,Offset(first,last),Offset(last,first),stroke,StrokeCap.Round)
                         }
                     }
                 }
@@ -3056,7 +3122,7 @@ private fun LazyListScope.rosterRows(m:PocketModel,rows:List<CoreSession>,spaces
             var showFilters by remember {mutableStateOf(false)}
             val filterAction=stringResource(R.string.agent_roster_status_filter)
             val activeFilter=stringResource(status.labelResource(agentsOnly))
-            RoundHeaderButton(
+            PocketIconControl(
                 label=filterAction,onClick={showFilters=true},emphasized=status!=SpaceStatusFilter.ALL,
                 modifier=Modifier.semantics {stateDescription=activeFilter},
             ) { ink ->
@@ -3069,7 +3135,7 @@ private fun LazyListScope.rosterRows(m:PocketModel,rows:List<CoreSession>,spaces
                     }
                 }
             }
-            DropdownMenu(expanded=showFilters,onDismissRequest={showFilters=false}) {
+            PocketMenu(expanded=showFilters,onDismissRequest={showFilters=false}) {
                 for(option in SpaceStatusFilter.entries) {
                     DropdownMenuItem(
                         text={Text(stringResource(option.labelResource(agentsOnly)),fontSize=18.sp)},
@@ -3098,7 +3164,7 @@ private fun SpaceStatusFilter.labelResource(agentsOnly:Boolean):Int = when(this)
 
 @Composable private fun RenameAgentDialog(m:PocketModel,session:CoreSession,agentSettings:Boolean=false) {
     var label by remember(session.address) {mutableStateOf(session.name)}
-    AlertDialog(
+    PocketDialog(
         onDismissRequest=m::cancelRename,
         title={Text(if(agentSettings) stringResource(R.string.agent_settings_edit_name) else "Rename pane")},
         text={

@@ -6,16 +6,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.vector.PathParser
-import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.VectorPath
+import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
@@ -33,7 +33,12 @@ private val agentFaces=intArrayOf(
 ) {
     val choice=remember(scope,address) {AgentAvatarDesign.pick(scope,address)}
     val palette=AgentAvatarDesign.colors[choice.color]
-    val face=painterResource(agentFaces[choice.face])
+    val face=ImageVector.vectorResource(agentFaces[choice.face])
+    val facePath=remember(face) {
+        // Every bundled face is one untransformed, filled vector path.
+        val vectorPath=face.root.single() as VectorPath
+        PathParser().addPathNodes(vectorPath.pathData).toPath().apply {fillType=vectorPath.pathFillType}
+    }
     val badge=when(status) {
         TuiAgents.Status.WORKING -> AgentStatusBadge.WORKING
         TuiAgents.Status.BLOCKED -> AgentStatusBadge.BLOCKED
@@ -51,7 +56,10 @@ private val agentFaces=intArrayOf(
             val faceOrigin=geometry.CIRCLE_CENTER-geometry.FACE_SIZE/2
             drawCircle(color(palette.background),geometry.CIRCLE_RADIUS,circle)
             translate(faceOrigin,faceOrigin) {
-                with(face) { draw(Size(geometry.FACE_SIZE,geometry.FACE_SIZE),colorFilter=ColorFilter.tint(color(palette.tint))) }
+                // Apply final size and density before rasterizing, rather than scaling a cached bitmap.
+                scale(geometry.FACE_SIZE/face.viewportWidth,geometry.FACE_SIZE/face.viewportHeight,pivot=Offset.Zero) {
+                    drawPath(facePath,color(palette.tint))
+                }
             }
             val corner=Offset(geometry.BADGE_CENTER,geometry.BADGE_CENTER)
             drawCircle(color(geometry.BADGE_EDGE),geometry.BADGE_EDGE_RADIUS,corner)

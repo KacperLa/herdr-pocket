@@ -10,4 +10,10 @@
     <string name="agent_watch_blocked_alert">An agent is blocked</string>
     <string name="agent_watch_done_alert">An agent is done</string>
     <string name="agent_watch_open_app">Open Herdr Pocket</string>
+    <string name="agent_watch_enable">Enable notifications</string>
+    <string name="agent_watch_opt_in">Get Done and Blocked alerts while Pocket is in the background.</string>
+    <string name="agent_watch_os_blocked">Allow Pocket notifications in Android settings to receive agent alerts.</string>
+    <string name="agent_watch_waiting">Waiting for a Herdr TUI connection.</string>
+    <string name="agent_watch_start_failed">Could not start agent alerts. Reconnect to Herdr and try again.</string>
+    <string name="agent_watch_android_settings">Android notification settings</string>
 </resources>

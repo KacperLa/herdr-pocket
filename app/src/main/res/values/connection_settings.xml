@@ -8,7 +8,7 @@
     <string name="connection_host_section">Connect to Herdr</string>
     <string name="connection_keys_section">SSH key management</string>
     <string name="connection_verify_section">Host fingerprint verification</string>
-    <string name="connection_alerts_section">Agent alerts</string>
+    <string name="connection_alerts_section">Notifications</string>
     <string name="connection_advanced_section">Advanced</string>
     <string name="connection_show_advanced">Show advanced options</string>
     <string name="connection_hide_advanced">Hide advanced options</string>

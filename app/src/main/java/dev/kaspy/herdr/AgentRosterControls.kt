@@ -2,6 +2,7 @@ package dev.kaspy.herdr
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -36,14 +37,13 @@ internal enum class AgentRosterView(val label:Int) {
     onViewChange:(AgentRosterView)->Unit,
     modifier:Modifier=Modifier,
 ) {
-    val theme=MaterialTheme.colorScheme
     Surface(
         modifier=modifier.widthIn(max=280.dp).fillMaxWidth(),
         shape=CircleShape,
-        border=BorderStroke(1.dp,theme.outline),
-        color=theme.surfaceContainerHigh,
-        contentColor=theme.onSurface,
-        shadowElevation=4.dp,
+        border=BorderStroke(1.dp,PocketOutline),
+        color=PocketBlack,
+        contentColor=PocketInk,
+        shadowElevation=0.dp,
     ) {
         Row(
             Modifier.selectableGroup().heightIn(min=48.dp),
@@ -62,14 +62,15 @@ internal enum class AgentRosterView(val label:Int) {
                 ) {
                     Box(
                         Modifier.fillMaxWidth().heightIn(min=42.dp)
-                            .background(if(selected) theme.primary else theme.surfaceContainerHigh,CircleShape)
+                            .background(if(selected) PocketSelected else PocketBlack,CircleShape)
+                            .then(if(selected) Modifier.border(2.dp,PocketInk,CircleShape) else Modifier)
                             .padding(horizontal=4.dp,vertical=4.dp),
                         contentAlignment=Alignment.Center,
                     ) {
                         Text(
                             text=stringResource(option.label),
                             style=MaterialTheme.typography.titleMedium,
-                            color=if(selected) theme.onPrimary else theme.onSurface,
+                            color=PocketInk,
                             fontWeight=FontWeight.SemiBold,
                             textAlign=TextAlign.Center,
                         )

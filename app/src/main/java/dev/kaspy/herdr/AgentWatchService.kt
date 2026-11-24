@@ -26,6 +26,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import java.util.UUID
 
 internal data class AgentWatchScope(val config:SshConfig,val namedSession:String?)
+internal const val AGENT_NOTIFICATIONS_ENABLED = "agent_notifications_enabled"
+
 internal data class AgentWatchAlertTarget(val scope:AgentWatchScope,val terminalId:String)
 internal enum class AgentWatchServiceFailure { NOTIFICATIONS_DISABLED, PROFILE_UNAVAILABLE, START_DENIED, START_TIMEOUT, CONNECTION_ENDED }
 internal sealed interface AgentWatchServiceState {
@@ -55,8 +57,11 @@ internal class AgentWatchService : Service() {
     override fun onStartCommand(intent:Intent?,flags:Int,startId:Int):Int {
         val incoming=intent?.data?.lastPathSegment
         if(intent?.action==STOP_ACTION) {
-            if(incoming!=null && incoming==token && incoming==ownedToken) finish(AgentWatchServiceState.Stopped)
-            else if(token==null) stopSelf(startId)
+            if(incoming!=null && incoming==token && incoming==ownedToken) {
+                getSharedPreferences("workspace", MODE_PRIVATE).edit()
+                    .putBoolean(AGENT_NOTIFICATIONS_ENABLED, false).apply()
+                finish(AgentWatchServiceState.Stopped)
+            } else if(token==null) stopSelf(startId)
             return START_NOT_STICKY
         }
         val start=pending?.takeIf {intent?.action==START_ACTION && it.token==incoming && it.token==ownedToken}
@@ -74,6 +79,9 @@ internal class AgentWatchService : Service() {
             return START_NOT_STICKY
         }
         pending=null
+        // The platform may reuse this service instance when a new verified profile
+        // replaces an existing watcher. Always retire the old transport first.
+        closeTransport()
         request=start
         token=start.token
         stateInService=AgentWatchState.CONNECTING

@@ -23,14 +23,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -143,20 +140,10 @@ internal fun AgentActionsMenu(buttonSize: Dp, onOpenMenu: () -> Unit) {
 
 @Composable
 private fun OverflowDotsButton(buttonSize: Dp, label: String, onOpenMenu: () -> Unit, enabled: Boolean = true) {
-    Surface(
-        onClick = onOpenMenu,
-        enabled = enabled,
-        shape = CircleShape,
-        color = Color(0xFF515151),
-        contentColor = Color.White,
-        border = BorderStroke(1.dp, Color.White),
-        modifier = Modifier.size(buttonSize).semantics { contentDescription = label },
-    ) {
-        Box(contentAlignment = Alignment.Center) {
-            Canvas(Modifier.size(24.dp)) {
-                for (position in listOf(0.23f, 0.50f, 0.77f)) {
-                    drawCircle(Color.White, 2.dp.toPx(), Offset(size.width / 2, size.height * position))
-                }
+    PocketIconControl(label, onOpenMenu, buttonSize, enabled) { ink ->
+        Canvas(Modifier.size(PocketGlyphSize)) {
+            for (position in listOf(0.23f, 0.50f, 0.77f)) {
+                drawCircle(ink, 1.5.dp.toPx(), Offset(size.width / 2, size.height * position))
             }
         }
     }
@@ -238,7 +225,7 @@ internal fun AgentMenuScreen(
                 val empty=stringResource(R.string.agent_settings_not_reported)
                 val type=if(agent!=null) agent.agent.takeIf {it.isNotBlank()} else
                     details?.let {stringResource(R.string.roster_row_terminal)}
-                Surface(Modifier.fillMaxWidth(),shape=RoundedCornerShape(20.dp),color=scheme.surfaceContainerLow) {
+                Surface(Modifier.fillMaxWidth(),shape=PocketPanelShape,color=PocketBlack,border=BorderStroke(1.dp,PocketOutline)) {
                     Column(Modifier.padding(horizontal=16.dp)) {
                         AgentSettingDetail(R.string.agent_settings_type,type ?: empty)
                         HorizontalDivider()
@@ -344,7 +331,7 @@ internal fun AgentFilesExplorer(
         backFocus.requestFocus()
     }
     state.deletePrompt?.let { prompt ->
-        AlertDialog(
+        PocketDialog(
             onDismissRequest = { onCancelDelete(prompt) },
             title = { Text(stringResource(R.string.agent_files_delete)) },
             text = {
@@ -540,7 +527,7 @@ private fun FilesFolderOptions(enabled: Boolean, onUpload: () -> Unit, onNewFold
     var open by remember { mutableStateOf(false) }
     Box {
         OverflowDotsButton(48.dp, stringResource(R.string.agent_files_folder_options), { open = true }, enabled)
-        DropdownMenu(expanded = open && enabled, onDismissRequest = { open = false }) {
+        PocketMenu(expanded = open && enabled, onDismissRequest = { open = false }) {
             DropdownMenuItem(
                 text = { Text(stringResource(R.string.agent_files_upload_menu)) },
                 onClick = { open = false; onUpload() },
@@ -561,7 +548,7 @@ private fun NewFilesFolderDialog(
 ) {
     var name by remember(prompt) { mutableStateOf("") }
     val valid = AgentFiles.newFolderName(name)
-    AlertDialog(
+    PocketDialog(
         onDismissRequest = { onCancel(prompt) },
         title = { Text(stringResource(R.string.agent_files_new_folder)) },
         text = {
@@ -597,7 +584,7 @@ private fun FilesEntryOptions(entry: AgentFileEntry, enabled: Boolean, onDelete:
                 open = true
             })
         } else Spacer(Modifier.size(48.dp))
-        DropdownMenu(expanded = open && enabled, onDismissRequest = { open = false }) {
+        PocketMenu(expanded = open && enabled, onDismissRequest = { open = false }) {
             DropdownMenuItem(
                 text = { Text(stringResource(R.string.agent_files_delete)) },
                 onClick = { open = false; onDelete() },
@@ -618,7 +605,7 @@ private fun PreviewOptionsMenu(
     var expanded by remember { mutableStateOf(false) }
     Box {
         OverflowDotsButton(48.dp, stringResource(R.string.agent_files_preview_options), { expanded = true })
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+        PocketMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             PreviewToggle(stringResource(R.string.agent_files_wrap), wrap, onWrapChange)
             PreviewToggle(stringResource(R.string.agent_files_line_numbers), lineNumbers, onLineNumbersChange)
             HorizontalDivider()
@@ -636,7 +623,7 @@ private fun PreviewOptionsMenu(
 private fun PreviewToggle(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
     DropdownMenuItem(
         text = { Text(label) },
-        trailingIcon = { Switch(checked = checked, onCheckedChange = null) },
+        trailingIcon = { Switch(checked = checked, onCheckedChange = null, colors = pocketSwitchColors()) },
         onClick = { onCheckedChange(!checked) },
         modifier = Modifier.heightIn(min = 48.dp).semantics {
             role = Role.Switch
@@ -821,23 +808,13 @@ private fun AgentPageHeader(
 @Composable
 private fun AgentFilesUpButton(onBack: () -> Unit) {
     val label = stringResource(R.string.agent_files_parent)
-    val ink = MaterialTheme.colorScheme.onSurface
-    Surface(
-        onClick = onBack,
-        modifier = Modifier.size(48.dp).semantics { contentDescription = label },
-        shape = CircleShape,
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        contentColor = ink,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-    ) {
-        Box(contentAlignment = Alignment.Center) {
-            Canvas(Modifier.size(24.dp)) {
-                val top = Offset(size.width * .50f, size.height * .20f)
-                val stroke = 2.3.dp.toPx()
-                drawLine(ink, top, Offset(size.width * .50f, size.height * .80f), stroke, StrokeCap.Round)
-                drawLine(ink, top, Offset(size.width * .24f, size.height * .46f), stroke, StrokeCap.Round)
-                drawLine(ink, top, Offset(size.width * .76f, size.height * .46f), stroke, StrokeCap.Round)
-            }
+    PocketIconControl(label, onBack) { ink ->
+        Canvas(Modifier.size(PocketGlyphSize)) {
+            val top = Offset(size.width * .50f, size.height * .20f)
+            val stroke = PocketGlyphStroke.toPx()
+            drawLine(ink, top, Offset(size.width * .50f, size.height * .80f), stroke, StrokeCap.Round)
+            drawLine(ink, top, Offset(size.width * .24f, size.height * .46f), stroke, StrokeCap.Round)
+            drawLine(ink, top, Offset(size.width * .76f, size.height * .46f), stroke, StrokeCap.Round)
         }
     }
 }
@@ -845,28 +822,17 @@ private fun AgentFilesUpButton(onBack: () -> Unit) {
 @Composable
 private fun FileTransferButton(upload: Boolean, enabled: Boolean, onClick: () -> Unit) {
     val label = stringResource(if (upload) R.string.agent_files_upload else R.string.agent_files_download)
-    val ink = MaterialTheme.colorScheme.onSurface.copy(alpha = if (enabled) 1f else .48f)
-    Surface(
-        onClick = onClick,
-        enabled = enabled,
-        modifier = Modifier.size(48.dp).semantics { contentDescription = label },
-        shape = CircleShape,
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        contentColor = ink,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-    ) {
-        Box(contentAlignment = Alignment.Center) {
-            Canvas(Modifier.size(24.dp)) {
-                val stroke = 2.3.dp.toPx()
-                fun point(x: Float, y: Float) = Offset(size.width * x, size.height * y)
-                val tip = point(.50f, if (upload) .16f else .67f)
-                val tail = if (upload) .67f else .16f
-                val wings = if (upload) .37f else .46f
-                drawLine(ink, point(.50f, tail), tip, stroke, StrokeCap.Round)
-                drawLine(ink, point(.29f, wings), tip, stroke, StrokeCap.Round)
-                drawLine(ink, point(.71f, wings), tip, stroke, StrokeCap.Round)
-                drawLine(ink, point(.17f, .85f), point(.83f, .85f), stroke, StrokeCap.Round)
-            }
+    PocketIconControl(label, onClick, enabled = enabled) { ink ->
+        Canvas(Modifier.size(PocketGlyphSize)) {
+            val stroke = PocketGlyphStroke.toPx()
+            fun point(x: Float, y: Float) = Offset(size.width * x, size.height * y)
+            val tip = point(.50f, if (upload) .16f else .67f)
+            val tail = if (upload) .67f else .16f
+            val wings = if (upload) .37f else .46f
+            drawLine(ink, point(.50f, tail), tip, stroke, StrokeCap.Round)
+            drawLine(ink, point(.29f, wings), tip, stroke, StrokeCap.Round)
+            drawLine(ink, point(.71f, wings), tip, stroke, StrokeCap.Round)
+            drawLine(ink, point(.17f, .85f), point(.83f, .85f), stroke, StrokeCap.Round)
         }
     }
 }
