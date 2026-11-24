@@ -194,3 +194,8 @@ Handset smoke test: select a Done agent, view the terminal, and return to Agents
 
 ## Herdr Pocket 0.44
 Both roster views show the status reported by Herdr. Pocket no longer marks a completion seen locally when the terminal is opened and does not issue server-side focus or acknowledgment commands. Reopening or pulling to refresh requests a new authoritative snapshot; there is no background polling.
+
+
+## Tap-to-record terminal dictation (0.67)
+
+Pocket records bounded 16 kHz mono PCM in memory on a worker until the stop tap (or the five-minute limit, which waits for the stop tap). Android on-device recognition reads the recording only afterward. A transcript is submitted once, with Enter, only when the recognizer has read the full audio and the same SSH terminal is still in the foreground. No audio file, cloud recognition fallback, or background recording. Partial segments never send; switching terminals, backgrounding or canceling discards the recording. Tests cover phases, incomplete audio, transcript joining and limits, and terminal identity. Smoke test on Pixel: dictate two phrases with a long silent pause, confirm the recording indicator stays on, then stop and verify both phrases arrive once. Repeat while switching away, and verify nothing is sent. The actual Android microphone and recognizer service were not exercised by the unit tests.

@@ -5,6 +5,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNull
 import org.junit.Test
+import org.connectbot.terminal.MAX_ENCODED_USER_LINE_CHARS
 
 class TerminalDictationTextTest {
     @Test fun onePrintableUnicodeLineWithoutAnEmbeddedEnter() {
@@ -58,7 +59,8 @@ class TerminalDictationTextTest {
         assertFalse(pending.allowsDelivery(original, resumed = false))
         pending.cancel()
         assertFalse(pending.allowsDelivery(original, resumed = true))
-        assertNull(terminalDictationText("a".repeat(2049)))
+        assertEquals(5000, terminalDictationText("a".repeat(5000))?.length)
+        assertNull(terminalDictationText("a".repeat(MAX_ENCODED_USER_LINE_CHARS + 1)))
     }
 
     @Test fun permissionResultCannotStartBeforeResumeOrStartTwice() {

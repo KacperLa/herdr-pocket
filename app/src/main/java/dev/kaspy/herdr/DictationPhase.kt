@@ -1,13 +1,12 @@
 package dev.kaspy.herdr
 
 internal enum class DictationPhase {
-    PERMISSION, WAITING_FOR_RESUME, CHECKING, STARTING, LISTENING, FINISHING, SUBMITTING;
+    PERMISSION, WAITING_FOR_RESUME, STARTING, RECORDING, STOPPING, CAPTURED, TRANSCRIBING, SUBMITTING;
 
-    val isRecording get() = this == LISTENING
-
-    // RecognitionListener readiness (or beginning of speech) starts the recording indicator.
-    fun speechReady() = if (this == STARTING) LISTENING else this
-
-    // Do not light up again if the provider reports duplicate or out-of-order callbacks.
-    fun speechEnded() = if (this == STARTING || this == LISTENING) FINISHING else this
+    val acceptsStopAndSend get() = this == RECORDING || this == CAPTURED
+    val isRecording get() = this == RECORDING
 }
+
+/** Do not submit partial segments, or a mic-based result from a provider ignoring the audio source. */
+internal fun recordedDictationCanSubmit(wroteAllAudio: Boolean, unreadBytes: Int?): Boolean =
+    wroteAllAudio && unreadBytes == 0

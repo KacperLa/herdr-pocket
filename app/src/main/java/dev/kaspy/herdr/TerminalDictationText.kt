@@ -1,8 +1,10 @@
 package dev.kaspy.herdr
 
+import org.connectbot.terminal.MAX_ENCODED_USER_LINE_CHARS
+
 /** Sanitize one final speech candidate; Enter is encoded separately by the terminal. */
 internal fun terminalDictationText(result: String?): String? {
-    if (result.isNullOrEmpty() || result.length > 2048) return null
+    if (result.isNullOrEmpty() || result.length > MAX_ENCODED_USER_LINE_CHARS) return null
     val line = StringBuilder(result.length)
     var pendingSpace = false
     var offset = 0
@@ -79,4 +81,34 @@ internal fun onDeviceSpeechModel(
         supportedForDownload.matches() -> DictationModel.NEEDS_DOWNLOAD
         else -> DictationModel.UNKNOWN
     }
+}
+
+/** Segments are retained in order, but never delivered until a complete final callback. */
+internal class RecordedDictationSegments {
+    private val line = StringBuilder()
+    private var overflow = false
+    var hasSegments = false
+        private set
+
+    fun add(candidates: List<String>?) {
+        hasSegments = true
+        if (overflow) return
+        val candidate = candidates?.asSequence()?.take(10)?.firstOrNull { it.isNotBlank() } ?: return
+        if (candidate.length > MAX_ENCODED_USER_LINE_CHARS) {
+            overflow = true
+            line.clear()
+            return
+        }
+        val cleaned = terminalDictationText(candidate) ?: return
+        val separator = if (line.isEmpty()) 0 else 1
+        if (line.length + separator + cleaned.length > MAX_ENCODED_USER_LINE_CHARS) {
+            overflow = true
+            line.clear()
+            return
+        }
+        if (separator != 0) line.append(' ')
+        line.append(cleaned)
+    }
+
+    fun result(): String? = if (!overflow && line.isNotEmpty()) line.toString() else null
 }

@@ -5,9 +5,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.media.AudioFormat
+import android.widget.Toast
 import android.speech.RecognitionListener
-import android.speech.RecognitionSupport
-import android.speech.RecognitionSupportCallback
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -89,37 +89,29 @@ internal fun TerminalDictationControls(
     val phase = dictation.phase
     LaunchedEffect(dictation, take, phase) {
         if (take == null) return@LaunchedEffect
-        when (phase) {
-            DictationPhase.CHECKING -> {
-                delay(1_500)
-                // A support query is optional. A slow or older provider can still record locally.
-                dictation.supportTimedOut(take)
-            }
-            DictationPhase.STARTING, DictationPhase.FINISHING, DictationPhase.SUBMITTING -> {
-                delay(8_000)
-                dictation.recognitionTimedOut(take, phase)
-            }
-            DictationPhase.LISTENING -> {
-                delay(45_000)
-                dictation.recognitionTimedOut(take, phase)
-            }
-            else -> Unit
+        val timeout = when (phase) {
+            DictationPhase.STARTING, DictationPhase.STOPPING, DictationPhase.SUBMITTING -> 8_000L
+            DictationPhase.TRANSCRIBING -> 120_000L
+            else -> return@LaunchedEffect
         }
+        delay(timeout)
+        dictation.timedOut(take, phase)
     }
 
-    val busy = phase != null && phase != DictationPhase.PERMISSION
-    val description = when {
-        busy -> "Cancel terminal dictation"
-        phase == DictationPhase.PERMISSION -> "Waiting for microphone permission"
-        else -> "Dictate to the terminal. Sends the final result with Enter."
+    val description = when (phase) {
+        DictationPhase.RECORDING, DictationPhase.CAPTURED -> "Stop recording, transcribe, and send with Enter"
+        DictationPhase.PERMISSION -> "Waiting for microphone permission"
+        null -> "Start dictation recording"
+        else -> "Cancel terminal dictation"
     }
     val message = when (phase) {
         DictationPhase.PERMISSION -> "Waiting for microphone permission."
         DictationPhase.WAITING_FOR_RESUME -> "Waiting for the terminal to return to the foreground."
-        DictationPhase.CHECKING -> "Checking on-device speech support. Tap mic to cancel."
-        DictationPhase.STARTING -> "Starting the microphone. Wait for Listening before speaking."
-        DictationPhase.LISTENING -> "Listening on this device. Sends with Enter when you finish. Tap mic to cancel."
-        DictationPhase.FINISHING -> "Finishing on-device dictation. Sends with Enter. Tap mic to cancel."
+        DictationPhase.STARTING -> "Starting the microphone."
+        DictationPhase.RECORDING -> "Recording. Pauses are OK. Tap again to transcribe and send."
+        DictationPhase.STOPPING -> "Stopping the microphone."
+        DictationPhase.CAPTURED -> "Recording reached its five-minute limit. Tap to transcribe and send."
+        DictationPhase.TRANSCRIBING -> "Transcribing the recording on this device."
         DictationPhase.SUBMITTING -> "Submitting recognized text to the active terminal."
         null -> dictation.notice ?: "Ready for on-device dictation."
     }
@@ -138,7 +130,8 @@ internal fun TerminalDictationControls(
             ),
         ) {
             val color = if (dictation.permissionPending) Color.White.copy(alpha = .38f) else Color.White
-            Icon(painterResource(R.drawable.ic_terminal_mic),contentDescription=null,
+            Icon(painterResource(if (phase?.acceptsStopAndSend == true) R.drawable.ic_terminal_record_stop
+                else R.drawable.ic_terminal_mic),contentDescription=null,
                 tint=color,modifier=Modifier.size(DockGlyphSize))
         }
     }
@@ -160,11 +153,26 @@ private class TerminalDictation(
     var notice by mutableStateOf<String?>(null)
         private set
     private var recognizer: SpeechRecognizer? = null
+    private var capture: DictationCapture? = null
+    private var captured: DictationPcm? = null
+    private var audioPipe: DictationAudioPipe? = null
 
     fun tap(requestPermission: () -> Unit) {
         if (permissionPending) return
-        if (take != null) {
-            cancel("Dictation cancelled. Nothing was sent.")
+        take?.let { ticket ->
+            when (phase) {
+                DictationPhase.RECORDING -> {
+                    phase = DictationPhase.STOPPING
+                    capture?.finish()
+                }
+                DictationPhase.CAPTURED -> {
+                    val pcm = captured
+                    captured = null
+                    if (pcm != null) beginTranscription(ticket, pcm)
+                    else cancel("No recording was available. Nothing was sent.", showToast = true)
+                }
+                else -> cancel("Dictation cancelled. Nothing was sent.")
+            }
             return
         }
         val terminal = terminalIdentity()
@@ -220,94 +228,94 @@ private class TerminalDictation(
             return
         }
 
+        phase = DictationPhase.STARTING
+        val worker = DictationCapture(context.mainExecutor, onStarted = {
+            if (take === ticket && phase == DictationPhase.STARTING && stillHere(ticket)) {
+                phase = DictationPhase.RECORDING
+            }
+        }, onComplete = { pcm, capped ->
+            capture = null
+            if (take !== ticket || !stillHere(ticket)) {
+                pcm?.close()
+            } else if (pcm == null) {
+                cancel("Couldn’t record audio. Check Android microphone access and try again.", showToast = true)
+            } else if (phase == DictationPhase.STOPPING) {
+                beginTranscription(ticket, pcm)
+            } else if (capped && phase == DictationPhase.RECORDING) {
+                captured = pcm
+                phase = DictationPhase.CAPTURED
+                toast("Five-minute recording limit reached. Tap the stop button to transcribe and send.")
+            } else {
+                pcm.close()
+                cancel("Recording stopped unexpectedly. Nothing was sent.", showToast = true)
+            }
+        })
+        capture = worker
         try {
+            worker.start()
+        } catch (_: RuntimeException) {
+            cancel("Couldn’t start the recorder. Nothing was sent.", showToast = true)
+        }
+    }
+
+    private fun stillHere(ticket: TerminalDictationTicket): Boolean =
+        resumed() && terminalIdentity() === ticket.terminal
+
+    private fun beginTranscription(ticket: TerminalDictationTicket, pcm: DictationPcm) {
+        if (!stillHere(ticket)) {
+            pcm.close()
+            cancel("The active terminal changed. Nothing was sent.")
+            return
+        }
+        phase = DictationPhase.TRANSCRIBING
+        try {
+            val pipe = DictationAudioPipe.open(pcm)
+            audioPipe = pipe
             val client = SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
             recognizer = client
-            val locale = Locale.getDefault()
+            client.setRecognitionListener(listener(ticket))
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
                 .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                .putExtra(RecognizerIntent.EXTRA_LANGUAGE, locale.toLanguageTag())
+                .putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
                 .putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
                 .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
                 .putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-            recognitionIntent = intent
-            recognitionLocale = locale
-            client.setRecognitionListener(listener(ticket))
-            phase = DictationPhase.CHECKING
-            try {
-                client.checkRecognitionSupport(intent, context.mainExecutor, object : RecognitionSupportCallback {
-                    override fun onSupportResult(support: RecognitionSupport) {
-                        if (take !== ticket || phase != DictationPhase.CHECKING) return
-                        when (onDeviceSpeechModel(
-                            locale.toLanguageTag(),
-                            support.installedOnDeviceLanguages,
-                            support.pendingOnDeviceLanguages,
-                            support.supportedOnDeviceLanguages,
-                        )) {
-                            DictationModel.PENDING ->
-                                cancel("The offline speech model for ${locale.displayName} is downloading. Try again when it finishes.")
-                            DictationModel.NEEDS_DOWNLOAD ->
-                                cancel("The offline speech model for ${locale.displayName} isn’t installed. Download it in Android’s speech settings.")
-                            DictationModel.INSTALLED, DictationModel.UNKNOWN -> beginListening(ticket)
-                        }
-                    }
-                    override fun onError(error: Int) {
-                        // Not all offline providers implement this optional query.
-                        beginListening(ticket)
-                    }
-                })
-            } catch (_: RuntimeException) {
-                beginListening(ticket)
-            }
-        } catch (_: RuntimeException) {
-            cancel("Couldn’t open Android’s on-device speech service. No audio was sent to a cloud recognizer.")
-        }
-    }
-
-    private var recognitionIntent: Intent? = null
-    private var recognitionLocale: Locale? = null
-
-    fun supportTimedOut(ticket: TerminalDictationTicket) = beginListening(ticket)
-
-    private fun beginListening(ticket: TerminalDictationTicket) {
-        if (take !== ticket || phase != DictationPhase.CHECKING) return
-        if (!resumed() || terminalIdentity() !== ticket.terminal) {
-            cancel("Dictation stopped because the active terminal changed or left the foreground. Nothing was sent.")
-            return
-        }
-        val client = recognizer ?: return
-        val intent = recognitionIntent ?: return
-        phase = DictationPhase.STARTING
-        try {
+                .putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, pipe.source)
+                .putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1)
+                .putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
+                .putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, DICTATION_HZ)
+                .putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION, RecognizerIntent.EXTRA_AUDIO_SOURCE)
             client.startListening(intent)
-        } catch (_: RuntimeException) {
-            cancel("Could not start the microphone. Check microphone access and try again.")
+            pipe.start(context.mainExecutor) {
+                if (take === ticket && phase == DictationPhase.TRANSCRIBING)
+                    cancel("Android’s on-device speech service couldn’t read the recording. Nothing was sent.", showToast = true)
+            }
+        } catch (_: Exception) {
+            // Once a pipe exists it owns the PCM and wipes it on close.
+            if (audioPipe == null) pcm.close()
+            cancel("Couldn’t open Android’s recorded-audio speech service. Nothing was sent.", showToast = true)
         }
     }
 
-    fun recognitionTimedOut(ticket: TerminalDictationTicket, timedPhase: DictationPhase) {
+    fun timedOut(ticket: TerminalDictationTicket, timedPhase: DictationPhase?) {
         if (take !== ticket || phase != timedPhase) return
         cancel(when (timedPhase) {
-            DictationPhase.STARTING -> "The speech service didn’t start the microphone. Check microphone access and retry."
-            DictationPhase.FINISHING -> "The speech service didn’t return text. Nothing was sent."
-            DictationPhase.SUBMITTING -> "The terminal didn’t accept the dictation. Nothing was sent."
-            else -> "Dictation reached its time limit. Nothing was sent."
-        })
+            DictationPhase.STARTING -> "The microphone didn’t start. Nothing was sent."
+            DictationPhase.STOPPING -> "The microphone didn’t finish. Nothing was sent."
+            DictationPhase.TRANSCRIBING -> "Android didn’t finish transcribing the recording. Nothing was sent."
+            DictationPhase.SUBMITTING -> "The terminal didn’t accept the dictation."
+            else -> "Dictation stopped. Nothing was sent."
+        }, showToast = true)
     }
 
     fun pause() {
-        // A permission activity is allowed to pause or stop us. Never open the mic until we resume.
-        when (phase) {
-            DictationPhase.CHECKING, DictationPhase.STARTING, DictationPhase.LISTENING, DictationPhase.FINISHING, DictationPhase.SUBMITTING ->
-                cancel("Dictation stopped when the terminal left the foreground. Nothing was sent.")
-            else -> Unit
-        }
+        // The microphone permission dialog may obscure the Activity; no capture starts until resumed.
+        if (phase != DictationPhase.PERMISSION && phase != DictationPhase.WAITING_FOR_RESUME && take != null)
+            cancel("Dictation stopped when the terminal left the foreground.")
     }
 
     fun cancelIfTargetChanged(terminal: Any?) {
-        if (take?.terminal?.let { it !== terminal } == true) {
-            cancel("The active terminal changed. Nothing was sent.")
-        }
+        if (take?.terminal?.let { it !== terminal } == true) cancel("The active terminal changed. Nothing was sent.")
     }
 
     fun dispose() = cancel(null)
@@ -315,21 +323,26 @@ private class TerminalDictation(
     private fun hasMicPermission(): Boolean =
         context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
-    private fun cancel(message: String?) {
-        take?.cancel()
-        release(cancel = true)
-        notice = message
+    private fun toast(message: String) {
+        if (resumed()) Toast.makeText(context, message, Toast.LENGTH_LONG).show()
     }
 
-    private fun release(cancel: Boolean) {
+    private fun cancel(message: String?, showToast: Boolean = false) {
+        take?.cancel()
         take = null
         phase = null
-        closeRecognizer(cancel)
+        capture?.cancel()
+        capture = null
+        captured?.close()
+        captured = null
+        closeRecognizer(cancel = true)
+        notice = message
+        if (showToast && message != null) toast(message)
     }
 
     private fun closeRecognizer(cancel: Boolean) {
-        recognitionIntent = null
-        recognitionLocale = null
+        audioPipe?.close()
+        audioPipe = null
         val client = recognizer
         recognizer = null
         if (client != null) {
@@ -338,83 +351,73 @@ private class TerminalDictation(
         }
     }
 
-    private fun listener(ticket: TerminalDictationTicket) = object : RecognitionListener {
-        override fun onReadyForSpeech(params: Bundle?) {
-            if (take === ticket && phase == DictationPhase.STARTING) {
-                if (!resumed() || terminalIdentity() !== ticket.terminal) {
-                    cancel("Dictation stopped. Nothing was sent.")
-                    return
-                }
-                phase = phase?.speechReady()
-            }
+    private fun submit(ticket: TerminalDictationTicket, results: List<String>?) {
+        if (take !== ticket || phase != DictationPhase.TRANSCRIBING) return
+        if (!stillHere(ticket)) {
+            cancel("The active terminal changed. Nothing was sent.")
+            return
         }
-        override fun onBeginningOfSpeech() = onReadyForSpeech(null)
+        if (audioPipe?.consumedAllAudio() != true) {
+            cancel("Android’s on-device speech service didn’t read the full recording. Nothing was sent.", showToast = true)
+            return
+        }
+        val text = ticket.finish(ticket.terminal, results)
+        if (text == null) {
+            cancel("No usable speech was recognized. Nothing was sent.", showToast = true)
+            return
+        }
+        phase = DictationPhase.SUBMITTING
+        closeRecognizer(cancel = false)
+        fun stillAllowed() = take === ticket && phase == DictationPhase.SUBMITTING &&
+            ticket.allowsDelivery(terminalIdentity(), resumed())
+        fun complete(accepted: Boolean) {
+            if (take !== ticket || phase != DictationPhase.SUBMITTING) return
+            take = null
+            phase = null
+            notice = if (accepted) "Dictation submitted with Enter."
+                else "Could not submit dictation to the active terminal."
+            if (!accepted) toast(checkNotNull(notice))
+        }
+        val posted = runCatching { send(ticket.terminal, text, ::stillAllowed, ::complete) }.getOrDefault(false)
+        if (!posted) complete(false)
+    }
+
+    private fun listener(ticket: TerminalDictationTicket) = object : RecognitionListener {
+        private val transcript = RecordedDictationSegments()
+        override fun onReadyForSpeech(params: Bundle?) = Unit
+        override fun onBeginningOfSpeech() = Unit
         override fun onRmsChanged(rmsdB: Float) = Unit
         override fun onBufferReceived(buffer: ByteArray?) = Unit
         override fun onPartialResults(partialResults: Bundle?) = Unit
         override fun onEvent(eventType: Int, params: Bundle?) = Unit
+        override fun onEndOfSpeech() = Unit
+        override fun onSegmentResults(segmentResults: Bundle) {
+            if (take === ticket && phase == DictationPhase.TRANSCRIBING)
+                transcript.add(segmentResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION))
+        }
+        override fun onEndOfSegmentedSession() = submit(ticket, transcript.result()?.let(::listOf))
 
-        override fun onEndOfSpeech() {
-            if (take === ticket) phase = phase?.speechEnded()
+        override fun onResults(results: Bundle?) {
+            // Some providers use a regular final callback even with audio-source mode.
+            // If there were segmented results, do not append a duplicate full hypothesis.
+            submit(ticket, if (transcript.hasSegments) transcript.result()?.let(::listOf)
+                else results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION))
         }
 
         override fun onError(error: Int) {
-            if (take !== ticket || phase == DictationPhase.SUBMITTING) return
-            val language = recognitionLocale?.displayName ?: "your language"
-            val stillCurrent = terminalIdentity() === ticket.terminal && resumed()
-            ticket.cancel()
-            release(cancel = false)
-            if (!stillCurrent) {
-                notice = "Dictation stopped. Nothing was sent."
-                return
-            }
-            notice = when (error) {
+            if (take !== ticket || phase != DictationPhase.TRANSCRIBING) return
+            val language = Locale.getDefault().displayName
+            val message = when (error) {
                 SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ->
-                    "The offline speech model for $language is unavailable. Check Android’s speech settings for a download."
+                    "The offline speech model for $language is unavailable. Check Android’s speech settings."
                 SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ->
                     "Android’s on-device speech service doesn’t support $language."
-                SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT ->
-                    "No speech recognized. Nothing was sent."
-                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
-                    "Microphone access is needed. Check Herdr’s microphone permission in Android Settings."
-                SpeechRecognizer.ERROR_AUDIO ->
-                    "Couldn’t capture audio. Turn on Android’s Microphone access and close other apps using the mic."
-                SpeechRecognizer.ERROR_RECOGNIZER_BUSY ->
-                    "Android’s speech service is busy. Close other dictation and try again."
-                SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT ->
-                    "The on-device speech service returned a network error. Herdr did not fall back to cloud dictation."
-                else -> "On-device speech service stopped (Android error $error). Nothing was sent."
+                SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech recognized. Nothing was sent."
+                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Android’s speech service is busy. Try again."
+                SpeechRecognizer.ERROR_AUDIO -> "Android’s speech service couldn’t read the recording. Nothing was sent."
+                else -> "On-device transcription stopped (Android error $error). Nothing was sent."
             }
-        }
-
-        override fun onResults(results: Bundle?) {
-            if (take !== ticket ||
-                (phase != DictationPhase.STARTING && phase != DictationPhase.LISTENING && phase != DictationPhase.FINISHING)
-            ) return
-            val terminal = if (resumed()) terminalIdentity() else null
-            val text = ticket.finish(
-                terminal, results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION),
-            )
-            if (text == null) {
-                val message = if (terminal !== ticket.terminal)
-                    "The active terminal changed or left the foreground. Nothing was sent."
-                else "No speech recognized. Nothing was sent."
-                release(cancel = false)
-                notice = message
-                return
-            }
-            phase = DictationPhase.SUBMITTING
-            closeRecognizer(cancel = false)
-            fun stillAllowed() = take === ticket && phase == DictationPhase.SUBMITTING &&
-                ticket.allowsDelivery(terminalIdentity(), resumed())
-            fun complete(accepted: Boolean) {
-                if (take !== ticket || phase != DictationPhase.SUBMITTING) return
-                release(cancel = false)
-                notice = if (accepted) "Dictation submitted with Enter."
-                    else "Could not submit dictation to the active terminal."
-            }
-            val posted = runCatching { send(ticket.terminal, text, ::stillAllowed, ::complete) }.getOrDefault(false)
-            if (!posted) complete(false)
+            cancel(message, showToast = true)
         }
     }
 }
