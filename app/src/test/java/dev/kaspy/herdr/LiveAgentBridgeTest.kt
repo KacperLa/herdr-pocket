@@ -28,11 +28,16 @@ class LiveAgentBridgeTest {
         val done=status("done",12)
         val (route,commands)=fixture(idle, text(original), idle,
             idle,text(original),idle,status("idle",10,"agent_prompted"),
-            working,done,text(completed),done,done,text(completed),done)
+            working,
+            done,text(original+"\nCheck things\nPartial"),done,
+            done,text(completed),done,done,text(completed),done,done,text(completed),done,
+            done,text(completed),done,done,text(completed),done)
         val identity=LiveAgentHerdr.status(idle,selected)!!.instance
         val before=route.ready(identity)!!
         assertTrue(route.submit(before,"Check things")==true)
-        val result=route.finish(before,"Check things",attempts=3,pause={})
+        var time=0L
+        val result=route.finish(before,"Check things",attempts=7,pause={time+=620},nowMs={time})
+        assertEquals(4340L,time)
         assertEquals("The answer is seven.",result.review)
         assertEquals(1,commands.count { "agent prompt " in it })
         assertTrue(commands.all {"chosen-session" in it && "w1:p1" in it})

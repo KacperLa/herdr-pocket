@@ -120,9 +120,11 @@ internal object LiveAgentHerdr {
         suspend fun finish(
             before:Capture,text:String,
             attempts:Int=180,pause:suspend ()->Unit={delay(620)},
+            nowMs:()->Long={System.nanoTime()/1_000_000},
         ):Result {
             var working=false
             var candidate:Capture?=null
+            var candidateSince=0L
             repeat(attempts) {
                 pause()
                 val state=current() ?: return Result("Pocket lost the agent. Check its terminal before sending anything again.")
@@ -137,12 +139,15 @@ internal object LiveAgentHerdr {
                 val newCompletion=state.completion?.let {it>maxOf(before.status.sequence,before.status.completion ?: 0uL)}==true
                 if(state.ready && state.sequence>before.status.sequence && (working || newCompletion)) {
                     val settled=capture(state)
-                    if(settled!=null && settled==candidate) {
+                    val now=nowMs()
+                    if(settled!=candidate) {
+                        candidate=settled
+                        candidateSince=now
+                    } else if(settled!=null && now-candidateSince>=2000) {
                         if(mayHaveActiveMenu(settled.screen)) return Result(
                             "The terminal appears to be waiting for a choice. Review it directly; Pocket did not approve anything.")
                         return Result("Herdr reported completion.",freshExcerpt(before.screen,settled.screen,text) ?: "",settled)
                     }
-                    candidate=settled
                 }
             }
             return Result("Pocket could not verify a completed answer. Check the terminal; no terminal text was shared.")
