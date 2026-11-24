@@ -12,6 +12,8 @@ import java.io.Closeable
 import java.io.IOException
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.locks.LockSupport
+import kotlin.math.abs
 
 private const val CAPTURE_RUNNING = 0
 private const val CAPTURE_FINISH = 1
@@ -21,7 +23,8 @@ internal const val MAX_DICTATION_MINUTES = 5
 private const val MAX_PCM_BYTES = DICTATION_HZ * 2 * 60 * MAX_DICTATION_MINUTES
 
 /** The only raw audio copy is a bounded buffer in process memory. */
-internal class DictationPcm(val bytes: ByteArray, val length: Int) : Closeable {
+internal class DictationPcm(val bytes: ByteArray, val length: Int, val peak: Int) : Closeable {
+    fun copyForReplay() = DictationPcm(bytes.copyOf(length), length, peak)
     override fun close() { bytes.fill(0) }
 }
 
@@ -42,6 +45,7 @@ internal class DictationCapture(
         var audio: AudioRecord? = null
         var bytes: ByteArray? = null
         var size = 0
+        var peak = 0
         val samples = ShortArray(2048)
         var success = false
         try {
@@ -68,6 +72,7 @@ internal class DictationCapture(
                 if (count == 0) Thread.sleep(12)
                 else for (i in 0 until count) {
                     val sample = samples[i].toInt()
+                    peak = maxOf(peak, abs(sample))
                     buffer[size++] = sample.toByte()
                     buffer[size++] = (sample shr 8).toByte()
                 }
@@ -84,7 +89,7 @@ internal class DictationCapture(
                 runCatching { it.release() }
             }
             val capped = size == MAX_PCM_BYTES
-            val captured = bytes?.takeIf { success && state.get() != CAPTURE_CANCEL }?.let { DictationPcm(it, size) }
+            val captured = bytes?.takeIf { success && state.get() != CAPTURE_CANCEL }?.let { DictationPcm(it, size, peak) }
             if (captured == null) bytes?.fill(0)
             main.execute {
                 if (state.get() == CAPTURE_CANCEL) captured?.close()
@@ -105,8 +110,8 @@ internal class DictationAudioPipe private constructor(
     @Volatile private var wroteAllAudio = false
     private var started = false
 
-    fun start(main: Executor, onFailure: () -> Unit) {
-        check(!started)
+    fun start(realTime: Boolean, main: Executor, onFailure: () -> Unit) {
+        if (closed || started) return
         val worker = Thread({
             var success = false
             try {
@@ -114,14 +119,25 @@ internal class DictationAudioPipe private constructor(
                 // Never block indefinitely if a provider claims support but does not read the pipe.
                 Os.fcntlInt(fd, OsConstants.F_SETFL, OsConstants.O_NONBLOCK)
                 var sent = 0
+                val chunk = 1024 // Exactly 32 ms of mono PCM at real-time speed.
                 while (!closed && sent < pcm.length) {
-                    val count = try {
-                        Os.write(fd, pcm.bytes, sent, minOf(4096, pcm.length - sent))
-                    } catch (e: ErrnoException) {
-                        if (e.errno != OsConstants.EAGAIN && e.errno != OsConstants.EINTR) throw e
-                        0
+                    val end = minOf(sent + chunk, pcm.length)
+                    val nextChunk = System.nanoTime() + dictationReplayDelayNanos(end - sent, realTime)
+                    while (!closed && sent < end) {
+                        val count = try {
+                            Os.write(fd, pcm.bytes, sent, end - sent)
+                        } catch (e: ErrnoException) {
+                            if (e.errno != OsConstants.EAGAIN && e.errno != OsConstants.EINTR) throw e
+                            0
+                        }
+                        if (count == 0) Thread.sleep(5) else sent += count
                     }
-                    if (count == 0) Thread.sleep(10) else sent += count
+                    // Wait even after the last frame so EOF does not race the tail of the recording.
+                    while (!closed) {
+                        val remaining = nextChunk - System.nanoTime()
+                        if (remaining <= 0) break
+                        LockSupport.parkNanos(remaining)
+                    }
                 }
                 success = !closed && sent == pcm.length
                 wroteAllAudio = success

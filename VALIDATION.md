@@ -199,3 +199,8 @@ Both roster views show the status reported by Herdr. Pocket no longer marks a co
 ## Tap-to-record terminal dictation (0.67)
 
 Pocket records bounded 16 kHz mono PCM in memory on a worker until the stop tap (or the five-minute limit, which waits for the stop tap). Android on-device recognition reads the recording only afterward. A transcript is submitted once, with Enter, only when the recognizer has read the full audio and the same SSH terminal is still in the foreground. No audio file, cloud recognition fallback, or background recording. Partial segments never send; switching terminals, backgrounding or canceling discards the recording. Tests cover phases, incomplete audio, transcript joining and limits, and terminal identity. Smoke test on Pixel: dictate two phrases with a long silent pause, confirm the recording indicator stays on, then stop and verify both phrases arrive once. Repeat while switching away, and verify nothing is sent. The actual Android microphone and recognizer service were not exercised by the unit tests.
+
+
+## Recorded-audio recognition compatibility (0.68)
+
+Replay starts after recognizer readiness or a short fallback delay and feeds PCM in paced frames. On no-match, speech timeout, or incomplete final input, retry the same in-memory recording once at real-time speed. Old recognizer callbacks cannot submit into a retry or a different terminal. Entirely zero microphone samples are reported separately from a transcription failure. The hardening does not enable cloud recognition or retain audio after the request. Unit tests cover replay durations and existing final-result/terminal guards. Physical Pixel microphone and recognizer acceptance still need a handset test.

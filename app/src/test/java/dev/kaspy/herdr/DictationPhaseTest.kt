@@ -21,6 +21,13 @@ class DictationPhaseTest {
         assertTrue(recordedDictationCanSubmit(true, 0))
     }
 
+    @Test fun replayPacesPcmAndAllowsEnoughTimeForLongRecordings() {
+        assertEquals(16_000_000L, dictationReplayDelayNanos(1024, realTime = false))
+        assertEquals(32_000_000L, dictationReplayDelayNanos(1024, realTime = true))
+        assertEquals(180_000L, dictationReplayTimeoutMillis(9_600_000, realTime = false))
+        assertEquals(330_000L, dictationReplayTimeoutMillis(9_600_000, realTime = true))
+    }
+
     @Test fun segmentsJoinInOrderIntoOneSanitizedLine() {
         val segments = RecordedDictationSegments()
         segments.add(listOf("First part", "alternate hypothesis"))
