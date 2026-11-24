@@ -18,6 +18,8 @@ data class TuiLocation(val terminalId:String,val paneId:String,val tabId:String,
     }
 }
 
+internal data class TuiWorkspaceChoice(val id:String,val label:String)
+
 /** Only structured Herdr operations. Display text and terminal identity are never used as shell syntax. */
 internal object TuiMutations {
     enum class Runner(val cli:String,val label:String) {
@@ -68,16 +70,34 @@ internal object TuiMutations {
             " --label "+TuiAgents.quote(name)+" --no-focus",session,startVersionCheck)
     }
 
+    fun createShellWorkspace(session:String?):String =
+        TuiAgents.resolve("workspace create --no-focus",session,startVersionCheck)
+
     fun createShellTab(workspaceId:String,session:String?):String =
         TuiAgents.resolve("tab create --workspace "+quotedId(workspaceId)+" --no-focus",session,startVersionCheck)
 
-    fun newPane(json:String,workspaceId:String):TuiLocation? = runCatching {
-        val created=result(json,"tab_created") ?: return null
+    fun workspaceChoices(json:String):List<TuiWorkspaceChoice> = runCatching {
+        val rows=result(json,"session_snapshot")?.optJSONObject("snapshot")?.optJSONArray("workspaces")
+            ?: return emptyList()
+        require(rows.length()<=4096)
+        (0 until rows.length()).mapNotNull { i ->
+            val row=rows.optJSONObject(i) ?: return@mapNotNull null
+            val id=(row.opt("workspace_id") as? String)?.let {
+                runCatching {TuiLocation.requireSafe(it)}.getOrNull()
+            } ?: return@mapNotNull null
+            val label=(row.opt("label") as? String)?.filterNot(Char::isISOControl)?.trim()?.take(120)
+            TuiWorkspaceChoice(id,label?.ifBlank {id} ?: id)
+        }.groupBy {it.id}.values.mapNotNull {it.singleOrNull()}
+    }.getOrDefault(emptyList())
+
+    fun newShellPane(json:String,workspaceId:String?):TuiLocation? = runCatching {
+        val created=result(json,if(workspaceId==null) "workspace_created" else "tab_created") ?: return null
+        val workspace=workspaceId ?: created.optJSONObject("workspace")?.opt("workspace_id") ?: return null
         val tab=created.optJSONObject("tab") ?: return null
         val pane=created.optJSONObject("root_pane") ?: return null
         val location=TuiLocation.from(pane) ?: return null
-        location.takeIf {it.workspaceId==workspaceId && tab.opt("workspace_id")==workspaceId &&
-            tab.opt("tab_id")==it.tabId }
+        location.takeIf {workspace==it.workspaceId &&
+            tab.opt("workspace_id")==it.workspaceId && tab.opt("tab_id")==it.tabId}
     }.getOrNull()
 
     fun startAgent(name:String,runner:Runner,pane:TuiLocation,session:String?):String {

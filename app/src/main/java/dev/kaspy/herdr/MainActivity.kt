@@ -709,13 +709,14 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         private set
     private var tuiCanCreate=false
     private var tuiRosterFresh=false
+    internal var createWorkspaceChoices by mutableStateOf<List<TuiWorkspaceChoice>>(emptyList())
+        private set
     private var nextRosterNotice:String?=null
     private var interruptedRosterNotice:String?=null
     private sealed interface TuiRosterWork {
         data class VerifyRename(val location:TuiLocation,val label:String):TuiRosterWork
         data class Rename(val location:TuiLocation,val label:String):TuiRosterWork
-        data class VerifyCreate(val anchor:TuiLocation):TuiRosterWork
-        data class CreateTab(val workspace:String):TuiRosterWork
+        data class CreateShell(val workspace:TuiWorkspaceChoice?):TuiRosterWork
         data class VerifyNewPane(val location:TuiLocation):TuiRosterWork
     }
     private var tuiWork:TuiRosterWork?=null
@@ -1469,6 +1470,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         if(target.backend==AgentBackend.TUI) {
             tuiRosterFresh=false
             tuiCanCreate=false
+            createWorkspaceChoices=emptyList()
         }
         val id=ssh.listOnTransport(target.backend.listCommand(target.tuiSession))
         if(id==null) {
@@ -1520,17 +1522,23 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun createPlainTerminal() {
+    internal fun createPlainTerminal(workspace:TuiWorkspaceChoice?=null) {
         if(!showAgentSwitcher || !canSwitchAgents || switchBusy || renamingAgent!=null) return
         val target=resume ?: return
         if(target.backend==AgentBackend.TUI) {
-            val loc=switchSessions.firstOrNull {it.address==activeCoreAddress}?.tuiLocation
-            if(!tuiCanCreate || !tuiRosterFresh || loc==null) {
-                switchMessage="Creating a shell from Pocket needs Herdr 0.7.5–0.9.x and a current workspace."
+            if(!tuiCanCreate || !tuiRosterFresh) {
+                switchMessage="Creating a shell from Pocket needs Herdr 0.7.5–0.9.x and a refreshed session list."
                 return
             }
-            beginTuiWork(TuiRosterWork.VerifyCreate(loc),TuiMutations.inspectPane(loc,target.tuiSession),
-                "Checking the current workspace…","Could not confirm the workspace. Nothing was created.")
+            if(workspace!=null && workspace !in createWorkspaceChoices) {
+                switchMessage="That workspace is no longer available. Refresh the list and choose again."
+                return
+            }
+            val command=if(workspace==null) TuiMutations.createShellWorkspace(target.tuiSession)
+                else TuiMutations.createShellTab(workspace.id,target.tuiSession)
+            beginTuiWork(TuiRosterWork.CreateShell(workspace),command,
+                if(workspace==null) "Creating a new workspace…" else "Creating a shell in ${workspace.label}…",
+                "Could not send the request. Nothing was created.")
         } else {
             val name="shell-"+java.util.UUID.randomUUID().toString().replace("-","").take(20)
             coreShellCreate=CoreShellCreate(name)
@@ -1615,19 +1623,19 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                 nextRosterNotice="Pane renamed."
                 refreshAgents()
             } else switchMessage="Could not confirm the pane rename. Refresh before trying again."
-            is TuiRosterWork.VerifyCreate -> if(ok && TuiMutations.confirmsPane(text,work.anchor)) {
-                beginTuiWork(TuiRosterWork.CreateTab(work.anchor.workspaceId),
-                    TuiMutations.createShellTab(work.anchor.workspaceId,target.tuiSession),"Creating an unfocused shell tab…",
-                    "Could not send the request. Nothing was created.")
-            } else switchMessage="The current workspace changed. Refresh before creating a shell."
-            is TuiRosterWork.CreateTab -> {
-                val fresh=if(ok) TuiMutations.newPane(text,work.workspace) else null
-                if(fresh!=null && switchSessions.none {it.address==fresh.terminalId || it.tuiLocation?.paneId==fresh.paneId}) {
+            is TuiRosterWork.CreateShell -> {
+                val fresh=if(ok) TuiMutations.newShellPane(text,work.workspace?.id) else null
+                if(fresh!=null && fresh.terminalId!=activeCoreAddress &&
+                    (work.workspace!=null || createWorkspaceChoices.none {it.id==fresh.workspaceId}) && switchSessions.none {
+                    it.address==fresh.terminalId || it.tuiLocation?.paneId==fresh.paneId ||
+                        (work.workspace==null && it.tuiLocation?.workspaceId==fresh.workspaceId) ||
+                        it.tuiLocation?.tabId==fresh.tabId
+                }) {
                     beginTuiWork(TuiRosterWork.VerifyNewPane(fresh),
                         TuiMutations.inspectPane(fresh,target.tuiSession),"Checking the new shell…",
                         "The shell was created but did not open. Refresh to find it.")
                 } else switchMessage=if(event.exitStatus==78) "This Herdr CLI does not support creating a shell from Pocket."
-                    else "Could not confirm creation. Check Herdr for the new tab before trying again."
+                    else "Could not confirm the new shell. Check Herdr before trying again."
             }
             is TuiRosterWork.VerifyNewPane -> if(ok && TuiMutations.confirmsPane(text,work.location)) {
                 val shell=TuiAgents.plainTerminal(work.location)
@@ -1691,7 +1699,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
     private fun clearAgentSwitcher() {
         interruptedRosterNotice=when(tuiWork) {
             is TuiRosterWork.Rename -> "Connection interrupted during rename. Check the current pane label."
-            is TuiRosterWork.CreateTab -> "Tab creation was interrupted. Check Herdr before trying again."
+            is TuiRosterWork.CreateShell -> "Shell creation was interrupted. Check Herdr before trying again."
             is TuiRosterWork.VerifyNewPane -> "A shell was created. Refresh to find it."
             else -> if(coreShellCreate!=null || switchingNewTerminal)
                 "The shell request was interrupted. Refresh to check for it before trying again."
@@ -1708,6 +1716,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         renamingAgent=null
         tuiCanCreate=false
         tuiRosterFresh=false
+        createWorkspaceChoices=emptyList()
         tuiWork=null
         nextRosterNotice=null
         switchMessage=""
@@ -1839,8 +1848,10 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                         switchSessions=backend.parse(event.stdout.toString(Charsets.UTF_8))
                             .filter { it.state=="live" }.distinctBy { it.address }
                         if(backend==AgentBackend.TUI) {
+                            val snapshot=event.stdout.toString(Charsets.UTF_8)
                             tuiRosterFresh=true
-                            tuiCanCreate=TuiMutations.canCreateFromRoster(event.stdout.toString(Charsets.UTF_8))
+                            tuiCanCreate=TuiMutations.canCreateFromRoster(snapshot)
+                            createWorkspaceChoices=if(tuiCanCreate) TuiMutations.workspaceChoices(snapshot) else emptyList()
                         }
                         // Reclassifying a pane after it starts an agent does not change its PTY.
                         TuiAgents.nameForTerminal(switchSessions,activeCoreAddress)?.let {agentName=it}
@@ -1869,9 +1880,8 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                     switchMessage=when(tuiWork) {
                         is TuiRosterWork.Rename -> "Could not confirm the pane rename. Refresh before trying again."
                         is TuiRosterWork.VerifyNewPane -> "The shell was created but did not open. Refresh to find it."
-                        is TuiRosterWork.CreateTab -> "Could not confirm tab creation. Check Herdr before trying again."
+                        is TuiRosterWork.CreateShell -> "Could not confirm the new shell. Check Herdr before trying again."
                         is TuiRosterWork.VerifyRename -> "Could not check the pane. No rename was sent."
-                        is TuiRosterWork.VerifyCreate -> "Could not check the workspace. Nothing was created."
                         null -> when {
                             coreShellCreate!=null -> "Could not confirm the new shell. Refresh before trying again."
                             switchingNewTerminal -> "The shell was created but could not open. Your current terminal is unchanged."
@@ -2857,11 +2867,19 @@ internal val pinnedStripArrangement = Arrangement.spacedBy(8.dp, Alignment.Cente
         focus.clearFocus(force=true)
         keyboard?.hide()
     }
+    var showCreateOptions by remember {mutableStateOf(false)}
+    var chooseWorkspace by remember {mutableStateOf(false)}
     BackHandler(onBack=when {
+        chooseWorkspace -> { {chooseWorkspace=false} }
         m.renamingAgent!=null -> m::cancelRename
         else -> m::dismissAgentSwitcher
     })
     m.renamingAgent?.let {RenameAgentDialog(m,it)}
+    if(chooseWorkspace) WorkspaceTerminalPicker(m.createWorkspaceChoices,
+        onCancel={chooseWorkspace=false},onChoose={
+            chooseWorkspace=false
+            m.createPlainTerminal(it)
+        })
     val isAgents=rosterView==AgentRosterView.AGENTS
     val title=stringResource(rosterView.label)
     val listLabel=stringResource(if(isAgents) R.string.agent_roster_agent_list else R.string.agent_roster_workspace_list)
@@ -2987,16 +3005,31 @@ internal val pinnedStripArrangement = Arrangement.spacedBy(8.dp, Alignment.Cente
                 Box(Modifier.weight(1f),contentAlignment=Alignment.Center) {
                     AgentRosterViewSwitch(rosterView,onRosterViewChange)
                 }
-                if(m.canCreateAgent) PocketIconControl(
-                    label=stringResource(R.string.agent_roster_new_terminal),
-                    onClick=m::createPlainTerminal,enabled=!m.switchBusy,
-                ) { ink ->
-                    Canvas(Modifier.size(24.dp)) {
-                        val center=size.width/2
-                        val edge=size.width*.22f
-                        val stroke=PocketGlyphStroke.toPx()
-                        drawLine(ink,Offset(edge,center),Offset(size.width-edge,center),stroke,StrokeCap.Round)
-                        drawLine(ink,Offset(center,edge),Offset(center,size.height-edge),stroke,StrokeCap.Round)
+                if(m.canCreateAgent) Box {
+                    PocketIconControl(
+                        label=stringResource(R.string.agent_roster_new_terminal),
+                        onClick={if(m.switchingTuiAgents) showCreateOptions=true else m.createPlainTerminal()},
+                        enabled=!m.switchBusy,
+                    ) { ink ->
+                        Canvas(Modifier.size(24.dp)) {
+                            val center=size.width/2
+                            val edge=size.width*.22f
+                            val stroke=PocketGlyphStroke.toPx()
+                            drawLine(ink,Offset(edge,center),Offset(size.width-edge,center),stroke,StrokeCap.Round)
+                            drawLine(ink,Offset(center,edge),Offset(center,size.height-edge),stroke,StrokeCap.Round)
+                        }
+                    }
+                    PocketMenu(expanded=showCreateOptions,onDismissRequest={showCreateOptions=false}) {
+                        DropdownMenuItem(
+                            text={Text(stringResource(R.string.agent_roster_new_workspace),fontSize=18.sp)},
+                            onClick={showCreateOptions=false;m.createPlainTerminal()},
+                            modifier=Modifier.heightIn(min=48.dp),
+                        )
+                        DropdownMenuItem(
+                            text={Text(stringResource(R.string.agent_roster_terminal_in_workspace),fontSize=18.sp)},
+                            onClick={showCreateOptions=false;chooseWorkspace=true},
+                            modifier=Modifier.heightIn(min=48.dp),
+                        )
                     }
                 } else Spacer(Modifier.size(48.dp))
             }
@@ -3163,6 +3196,37 @@ private fun SpaceStatusFilter.labelResource(agentsOnly:Boolean):Int = when(this)
 @Composable private fun RosterEmptyMessage(text:Int) {
     Text(stringResource(text),style=MaterialTheme.typography.bodyLarge,
         color=MaterialTheme.colorScheme.onSurfaceVariant,modifier=Modifier.padding(horizontal=4.dp,vertical=8.dp))
+}
+
+@Composable private fun WorkspaceTerminalPicker(
+    workspaces:List<TuiWorkspaceChoice>,onCancel:()->Unit,onChoose:(TuiWorkspaceChoice)->Unit,
+) {
+    val duplicates=remember(workspaces) {workspaces.groupingBy {it.label}.eachCount()}
+    PocketDialog(
+        onDismissRequest=onCancel,
+        title={Text(stringResource(R.string.agent_roster_choose_workspace))},
+        text={
+            Column(verticalArrangement=Arrangement.spacedBy(10.dp)) {
+                Text(stringResource(if(workspaces.isEmpty()) R.string.agent_roster_no_workspace_destinations
+                    else R.string.agent_roster_workspace_opens_shell))
+                if(workspaces.isNotEmpty()) LazyColumn(
+                    modifier=Modifier.fillMaxWidth().heightIn(max=320.dp),
+                    verticalArrangement=Arrangement.spacedBy(6.dp),
+                ) {
+                    items(workspaces,key={it.id}) { workspace ->
+                        OutlinedButton(
+                            onClick={onChoose(workspace)},
+                            modifier=Modifier.fillMaxWidth().heightIn(min=48.dp),
+                        ) {
+                            Text(if((duplicates[workspace.label] ?: 0)>1) "${workspace.label} (${workspace.id})" else workspace.label,
+                                fontSize=17.sp,maxLines=2,overflow=TextOverflow.Ellipsis)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton={TextButton(onClick=onCancel){Text(stringResource(android.R.string.cancel))}},
+    )
 }
 
 @Composable private fun RenameAgentDialog(m:PocketModel,session:CoreSession,agentSettings:Boolean=false) {

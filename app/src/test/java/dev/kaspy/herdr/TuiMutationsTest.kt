@@ -22,10 +22,18 @@ class TuiMutationsTest {
     }
 
     @Test fun creationUsesExactReturnedNewPaneAndAgentAndOnlySupportedVersion() {
-        val created="""{"result":{"type":"tab_created","tab":{"tab_id":"w1:t3","workspace_id":"w1"},"root_pane":{$fields}}}"""
-        assertEquals(loc,TuiMutations.newPane(created,"w1"))
-        assertNull(TuiMutations.newPane(created,"w2"))
-        assertNull(TuiMutations.newPane(created.replaceFirst("w1:t3","w1:t4"),"w1"))
+        val created="""{"result":{"type":"workspace_created","workspace":{"workspace_id":"w1"},"tab":{"tab_id":"w1:t3","workspace_id":"w1"},"root_pane":{$fields}}}"""
+        assertEquals(loc,TuiMutations.newShellPane(created,null))
+        assertNull(TuiMutations.newShellPane(created.replaceFirst("workspace_created","tab_created"),null))
+        assertNull(TuiMutations.newShellPane(created.replaceFirst("w1","w2"),null))
+        assertNull(TuiMutations.newShellPane(created.replaceFirst("w1:t3","w1:t4"),null))
+        assertNull(TuiMutations.newShellPane(created.replace("root_pane","other_pane"),null))
+        val tab=created.replaceFirst("workspace_created","tab_created")
+        assertEquals(loc,TuiMutations.newShellPane(tab,"w1"))
+        assertNull(TuiMutations.newShellPane(tab,"w2"))
+        assertNull(TuiMutations.newShellPane(created,"w1"))
+        assertFalse(TuiMutations.confirmsPane(response("pane_info","pane","""{$fields}"""),
+            loc.copy(workspaceId="w2")))
         val started=response("agent_started","agent","""{$fields,"name":"jetson"}""")
         assertTrue(TuiMutations.confirmsStart(started,loc,"jetson"))
         assertFalse(TuiMutations.confirmsStart(started,loc,"another"))
@@ -36,7 +44,20 @@ class TuiMutationsTest {
         assertFalse(TuiMutations.canCreateFromRoster("""{"result":{"type":"agent_list","agents":[]}}"""))
     }
 
-    @Test fun labelsAreSingleInertArgumentsAndOnlyNewTabOperationsAreEmitted() {
+    @Test fun chooserUsesSnapshotWorkspaceIdsNotLabelsOrTheActivePane() {
+        val snapshot=response("session_snapshot","snapshot","""{"workspaces":[
+            {"workspace_id":"w2","label":"Same project"},
+            {"workspace_id":"w1","label":"Same project"},
+            {"workspace_id":"w3","label":"   "},
+            {"workspace_id":"w4","label":"duplicate"},{"workspace_id":"w4","label":"ambiguous"},
+            {"workspace_id":"--bad","label":"Invalid"}
+        ]}""")
+        assertEquals(listOf(TuiWorkspaceChoice("w2","Same project"),TuiWorkspaceChoice("w1","Same project"),
+            TuiWorkspaceChoice("w3","w3")), TuiMutations.workspaceChoices(snapshot))
+        assertTrue(TuiMutations.workspaceChoices("not a snapshot").isEmpty())
+    }
+
+    @Test fun workspaceCreationKeepsNamedSessionAndDoesNotSpawnAnAgentOrStealFocus() {
         val root=Files.createTempDirectory("herdr friendly name").toFile()
         try {
             val cli=root.resolve(".local/bin/herdr")
@@ -53,8 +74,16 @@ class TuiMutationsTest {
                 assertEquals(exit,proc.exitValue())
                 return proc.inputStream.bufferedReader().readLines()
             }
-            assertEquals(listOf("--session","work.local","tab","create","--workspace","w1","--no-focus"),
-                run(TuiMutations.createShellTab("w1","work.local")))
+            assertEquals(listOf("--session","work.local","workspace","create","--no-focus"),
+                run(TuiMutations.createShellWorkspace("work.local")))
+            assertEquals(listOf("workspace","create","--no-focus"),
+                run(TuiMutations.createShellWorkspace(null),"0.7.5"))
+            assertEquals(listOf("HERDR_POCKET_AGENT_START_UNSUPPORTED"),
+                run(TuiMutations.createShellWorkspace(null),"0.7.4",78))
+            assertEquals(listOf("--session","work.local","tab","create","--workspace","w2","--no-focus"),
+                run(TuiMutations.createShellTab("w2","work.local")))
+            assertEquals(listOf("--session","work.local","terminal","attach","term_one"),
+                run(AgentBackend.TUI.switchCommand(loc.terminalId,"work.local")))
             val label="Jetson's AI; \$(printf EXTRA)"
             val scope=listOf("--session","work.local")
             assertEquals(scope+listOf("pane","get","w1:p2"),run(TuiMutations.inspectPane(loc,"work.local")))
