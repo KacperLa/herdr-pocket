@@ -4,4 +4,9 @@
     <string name="roster_row_error">Error</string>
     <string name="roster_row_pane_number">Pane %1$d</string>
     <string name="roster_row_rename">Rename pane</string>
+    <string name="roster_agent_options">Agent options</string>
+    <string name="roster_agent_pin">Pin to top</string>
+    <string name="roster_agent_unpin">Unpin</string>
+    <string name="roster_agent_pinned">Pinned</string>
+    <string name="roster_agent_pinned_strip">Pinned agents</string>
 </resources>

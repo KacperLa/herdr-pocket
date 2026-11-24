@@ -9,4 +9,17 @@
     <string name="terminal_key_page_down">Page Down</string>
     <string name="terminal_key_enter">Enter</string>
     <string name="terminal_key_tab">Tab</string>
+    <string name="terminal_key_escape">Escape</string>
+    <string name="terminal_key_control">Control modifier</string>
+    <string name="terminal_key_alt">Alt modifier</string>
+    <string name="terminal_modifier_armed">Armed</string>
+    <string name="terminal_modifier_off">Off</string>
+    <string name="terminal_key_slash">Slash</string>
+    <string name="terminal_directional_keys">Directional keys</string>
+    <string name="terminal_directional_expanded">Expanded</string>
+    <string name="terminal_directional_collapsed">Collapsed</string>
+    <string name="terminal_key_left">Left</string>
+    <string name="terminal_key_up">Up</string>
+    <string name="terminal_key_right">Right</string>
+    <string name="terminal_key_down">Down</string>
 </resources>

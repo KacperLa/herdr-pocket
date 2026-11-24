@@ -29,6 +29,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -162,16 +163,30 @@ private fun OverflowDotsButton(buttonSize: Dp, label: String, onOpenMenu: () -> 
 }
 
 @Composable
-internal fun AgentMenuScreen(agentName: String, onOpenFiles: () -> Unit, onBack: () -> Unit) {
+internal fun AgentMenuScreen(
+    agentName: String,
+    details: CoreSession?,
+    avatarScope: AgentAvatarScope?,
+    canEditName: Boolean,
+    refreshing: Boolean,
+    notice: String?,
+    onEditName: () -> Unit,
+    onRefresh: () -> Unit,
+    onOpenFiles: () -> Unit,
+    onBack: () -> Unit,
+) {
     val title = displayFileName(agentName).ifBlank { stringResource(R.string.agent_menu_fallback_title) }
+    val scheme = MaterialTheme.colorScheme
+    val agent = details?.takeIf { it.isAgent }
+    val summary = details?.let(::agentCardSummary)
     val returnToTerminal = stringResource(R.string.agent_menu_back)
     val focus = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
-    val filesFocus = remember { FocusRequester() }
+    val backFocus = remember { FocusRequester() }
     LaunchedEffect(Unit) {
         focus.clearFocus(force = true)
         keyboard?.hide()
-        filesFocus.requestFocus()
+        backFocus.requestFocus()
     }
     BackHandler(onBack = onBack)
     Surface(
@@ -182,16 +197,61 @@ internal fun AgentMenuScreen(agentName: String, onOpenFiles: () -> Unit, onBack:
         contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
         Column(Modifier.fillMaxSize().safeDrawingPadding()) {
-            AgentPageHeader(title, returnToTerminal, onBack)
-            HorizontalDivider()
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
+                RoundBackArrow(returnToTerminal, onBack, 48.dp, Modifier.focusRequester(backFocus))
+            }
             Column(
-                Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState()).padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(18.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                val cardColor = MaterialTheme.colorScheme.onSurface
+                if (agent != null) {
+                    val reportedError=agent.status.equals("error",ignoreCase=true)
+                    val status=if(reportedError) TuiAgents.Status.BLOCKED else TuiAgents.status(agent.status)
+                    val statusLabel=stringResource(if(reportedError) R.string.roster_row_error else when(status) {
+                        TuiAgents.Status.WORKING -> R.string.agent_status_working
+                        TuiAgents.Status.BLOCKED -> R.string.agent_status_blocked
+                        TuiAgents.Status.DONE -> R.string.agent_status_done
+                        TuiAgents.Status.IDLE -> R.string.agent_status_idle
+                        TuiAgents.Status.UNKNOWN -> R.string.agent_status_unknown
+                    })
+                    AgentFaceAvatar(avatarScope,agent.address,status,statusLabel,diameter=120.dp)
+                } else if (details != null) {
+                    TerminalAvatar(diameter=120.dp)
+                } else if (refreshing) {
+                    Box(Modifier.size(120.dp),contentAlignment=Alignment.Center) { CircularProgressIndicator() }
+                }
+                Text(title,style=MaterialTheme.typography.headlineMedium,fontWeight=FontWeight.SemiBold,
+                    textAlign=TextAlign.Center,modifier=Modifier.fillMaxWidth().semantics { heading() })
+                if (canEditName) {
+                    FilledTonalButton(onClick=onEditName,enabled=!refreshing,modifier=Modifier.heightIn(min=48.dp)) {
+                        Text(stringResource(R.string.agent_settings_edit_name))
+                    }
+                }
+                notice?.takeIf {it.isNotBlank()}?.let {
+                    Text(it,style=MaterialTheme.typography.bodyMedium,textAlign=TextAlign.Center,
+                        modifier=Modifier.fillMaxWidth().semantics { liveRegion=LiveRegionMode.Polite })
+                }
+                if (!refreshing && details==null && notice!=null) {
+                    TextButton(onClick=onRefresh) {Text(stringResource(R.string.agent_files_retry))}
+                }
+                val empty=stringResource(R.string.agent_settings_not_reported)
+                val type=if(agent!=null) agent.agent.takeIf {it.isNotBlank()} else
+                    details?.let {stringResource(R.string.roster_row_terminal)}
+                Surface(Modifier.fillMaxWidth(),shape=RoundedCornerShape(20.dp),color=scheme.surfaceContainerLow) {
+                    Column(Modifier.padding(horizontal=16.dp)) {
+                        AgentSettingDetail(R.string.agent_settings_type,type ?: empty)
+                        HorizontalDivider()
+                        AgentSettingDetail(R.string.agent_settings_description,summary?.description ?: empty)
+                        HorizontalDivider()
+                        AgentSettingDetail(R.string.agent_settings_path,summary?.path ?: empty)
+                    }
+                }
+                val cardColor = scheme.onSurface
                 Surface(
                     onClick = onOpenFiles,
-                    modifier = Modifier.focusRequester(filesFocus).fillMaxWidth().heightIn(min = 64.dp),
+                    enabled = !refreshing,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 64.dp),
                     shape = RoundedCornerShape(16.dp),
                     color = MaterialTheme.colorScheme.surfaceVariant,
                     contentColor = cardColor,
@@ -225,6 +285,15 @@ internal fun AgentMenuScreen(agentName: String, onOpenFiles: () -> Unit, onBack:
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun AgentSettingDetail(label:Int,value:String) {
+    Column(Modifier.fillMaxWidth().padding(vertical=12.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
+        Text(stringResource(label),style=MaterialTheme.typography.labelLarge,
+            color=MaterialTheme.colorScheme.onSurfaceVariant)
+        SelectionContainer { Text(displayFileName(value),style=MaterialTheme.typography.bodyLarge) }
     }
 }
 

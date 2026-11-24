@@ -7,6 +7,15 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class CoreSessionsTest {
+    @Test fun activeProfileRequiresAnExactUniqueLiveTerminalId() {
+        val target=CoreSession("term_a","Same name","live","Codex","working",description="exact",spacesPath="/work/exact")
+        val other=target.copy(address="term_b",description="wrong",spacesPath="/work/wrong")
+        assertSame(target,activeProfileRow(listOf(other,target),"term_a"))
+        assertNull(activeProfileRow(listOf(other,target),"Same name"))
+        assertNull(activeProfileRow(listOf(target,target.copy(name="duplicate")),"term_a"))
+        assertNull(activeProfileRow(listOf(target.copy(state="closed")),"term_a"))
+    }
+
     @Test fun agentCardRemovesOnlyExactStructuredWorkspaceSuffix() {
         for(separator in listOf(" · "," • "," | "," — "," – "," - ")) {
             assertEquals("Implement the small UI change",agentCardDescription(

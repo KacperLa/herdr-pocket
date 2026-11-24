@@ -37,3 +37,8 @@ internal class StartupReconnect {
 internal fun startupSession(sessions: List<CoreSession>, rememberedAddress: String?): CoreSession? =
     if (rememberedAddress == null) CoreSessions.autoAttach(sessions, null)
     else sessions.singleOrNull { it.state == "live" && it.address == rememberedAddress }
+
+/** Ordinary discovery (including startup) stops at the roster, even for one live row. */
+internal fun explicitRosterSelection(sessions:List<CoreSession>,watchTarget:String?,preferred:String?):CoreSession? =
+    if(watchTarget!=null) sessions.singleOrNull {it.isAgent && it.state=="live" && it.address==watchTarget}
+    else preferred?.let {key -> sessions.singleOrNull {it.state=="live" && it.address==key} }

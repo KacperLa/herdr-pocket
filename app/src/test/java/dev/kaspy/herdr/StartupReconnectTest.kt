@@ -60,4 +60,17 @@ class StartupReconnectTest {
         assertEquals(other, startupSession(listOf(other), null))
         assertNull(startupSession(listOf(other, main.copy(name = "second")), null))
     }
+
+    @Test fun rosterNeverAutomaticallyAttachesOrdinaryDiscoveryOrStartupWithOneRow() {
+        val only=CoreSession("term_a","main","live","Codex","working")
+        assertNull(explicitRosterSelection(listOf(only),null,null))
+        assertNull(explicitRosterSelection(emptyList(),null,null))
+        assertNull(explicitRosterSelection(listOf(only),"missing",only.address))
+        assertEquals(only,explicitRosterSelection(listOf(only),only.address,null))
+        assertEquals(only,explicitRosterSelection(listOf(only),null,only.address))
+        assertNull(explicitRosterSelection(listOf(only,only),null,only.address))
+        val shell=only.copy(agent="",isAgent=false)
+        assertNull(explicitRosterSelection(listOf(shell),shell.address,null))
+        assertEquals(shell,explicitRosterSelection(listOf(shell),null,shell.address))
+    }
 }

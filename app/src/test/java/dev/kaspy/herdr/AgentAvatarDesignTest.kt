@@ -8,19 +8,17 @@ class AgentAvatarDesignTest {
     private val scope=AgentAvatarScope("TUI","example.org",22,"tester","work")
 
     @Test fun shapesStayStableAndUseOnlyValidIndices() {
-        val ids=(0..255).map {"term_${it.toString(16)}"}
+        val ids=(0..2047).map {"term_${it.toString(16)}"}
         val choices=ids.associateWith {AgentAvatarDesign.pick(scope,it)}
         for(id in ids.reversed()) {
             val selected=choices.getValue(id)
             assertEquals(selected,AgentAvatarDesign.pick(scope.copy(),id))
-            assertTrue(selected.head in AgentAvatarDesign.heads.indices)
-            assertTrue(selected.face in AgentAvatarDesign.faces.indices)
-            assertTrue(selected.palette in AgentAvatarDesign.palettes.indices)
+            assertTrue(selected.face in 0 until AgentAvatarDesign.FACE_COUNT)
+            assertTrue(selected.color in AgentAvatarDesign.colors.indices)
         }
-        assertEquals(AgentAvatarDesign.heads.size,choices.values.map {it.head}.toSet().size)
-        assertEquals(AgentAvatarDesign.faces.size,choices.values.map {it.face}.toSet().size)
-        assertEquals(AgentAvatarDesign.palettes.size,choices.values.map {it.palette}.toSet().size)
-        assertTrue(choices.values.groupBy {it.head}.values.all {rows -> rows.map {it.face}.toSet().size>1 })
+        assertEquals(AgentAvatarDesign.FACE_COUNT,choices.values.map {it.face}.toSet().size)
+        assertEquals(AgentAvatarDesign.colors.size,choices.values.map {it.color}.toSet().size)
+        assertTrue(choices.values.groupBy {it.face}.values.all {rows -> rows.map {it.color}.toSet().size>1 })
     }
 
     @Test fun routingScopeDistinguishesOriginsAndCanonicalizesDefaultSession() {
@@ -33,7 +31,7 @@ class AgentAvatarDesignTest {
 
         assertEquals(AgentAvatarDesign.pick(scope.copy(session=null),"term_1"),
             AgentAvatarDesign.pick(scope.copy(session="default"),"term_1"))
-        assertEquals(AgentAvatarDesign.pick(null,"term_1"),AgentAvatarDesign.pick(null,"term_2"))
+        assertEquals(AgentFaceChoice(0,0),AgentAvatarDesign.pick(null,""))
     }
 
     @Test fun circleAndBadgeFitTheSame54DpSlot() {
@@ -43,11 +41,13 @@ class AgentAvatarDesignTest {
         assertTrue(art.CIRCLE_CENTER+art.CIRCLE_RADIUS<=art.CANVAS_SIZE)
         assertTrue(art.BADGE_CENTER+art.BADGE_EDGE_RADIUS<=art.CANVAS_SIZE)
         assertTrue(art.BADGE_EDGE_RADIUS-art.BADGE_FACE_RADIUS>=1.5f)
-        assertTrue(art.ART_SCALE in .80f.. .87f)
+        val ringRadius=art.FACE_SIZE*10f/24f
+        val cornerDistance=kotlin.math.sqrt(2f)*(art.BADGE_CENTER-art.CIRCLE_CENTER)
+        assertTrue(cornerDistance-art.BADGE_EDGE_RADIUS-ringRadius>=2f)
     }
 
     @Test fun badgeGlyphsAreDistinctAndHaveStrongContrast() {
-        val badges=RobotBadge.entries
+        val badges=AgentStatusBadge.entries
         assertEquals(5,badges.map {it.glyph.data}.toSet().size)
         assertEquals(5,badges.map {it.color}.toSet().size)
         for(badge in badges) {
@@ -55,11 +55,10 @@ class AgentAvatarDesignTest {
             assertTrue(badge.name,contrast(badge.color,AgentAvatarDesign.BADGE_EDGE)>=7.0)
             assertTrue(badge.name,badge.glyph.stroke>=1.5f)
         }
-        for(palette in AgentAvatarDesign.palettes) {
-            assertTrue(contrast(palette.shell,palette.backdrop)>=5.0)
-            assertTrue(contrast(palette.shell,AgentAvatarDesign.VISOR)>=7.0)
+        assertEquals(72,AgentAvatarDesign.colors.map {it.tint}.toSet().size)
+        for(palette in AgentAvatarDesign.colors) {
+            assertTrue(contrast(palette.tint,palette.background)>=7.0)
         }
-        assertTrue(contrast(AgentAvatarDesign.EYES,AgentAvatarDesign.VISOR)>=7.0)
     }
 
     private fun contrast(a:Int,b:Int):Double {

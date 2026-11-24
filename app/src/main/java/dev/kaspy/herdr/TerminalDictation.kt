@@ -12,7 +12,7 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Canvas
+import androidx.compose.material3.Icon
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -26,19 +26,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -132,7 +127,7 @@ internal fun TerminalDictationControls(
         IconButton(
             onClick = { dictation.tap { permission.launch(Manifest.permission.RECORD_AUDIO) } },
             enabled = !dictation.permissionPending,
-            modifier = Modifier.size(48.dp).semantics {
+            modifier = Modifier.size(DockTargetSize).semantics {
                 contentDescription = description
                 stateDescription = message
                 liveRegion = LiveRegionMode.Polite
@@ -143,18 +138,8 @@ internal fun TerminalDictationControls(
             ),
         ) {
             val color = if (dictation.permissionPending) Color.White.copy(alpha = .38f) else Color.White
-            Canvas(Modifier.size(26.dp)) {
-                fun p(x: Float, y: Float) = Offset(size.width * x, size.height * y)
-                val stroke = size.width * .075f
-                drawRoundRect(
-                    color, topLeft = p(.36f, .10f), size = Size(size.width * .28f, size.height * .52f),
-                    cornerRadius = CornerRadius(size.width * .14f), style = Stroke(stroke),
-                )
-                drawArc(color, 0f, 180f, false, p(.22f, .32f),
-                    Size(size.width * .56f, size.height * .56f), style = Stroke(stroke, cap = StrokeCap.Round))
-                drawLine(color, p(.50f, .88f), p(.50f, .98f), stroke, StrokeCap.Round)
-                drawLine(color, p(.34f, .98f), p(.66f, .98f), stroke, StrokeCap.Round)
-            }
+            Icon(painterResource(R.drawable.ic_terminal_mic),contentDescription=null,
+                tint=color,modifier=Modifier.size(DockGlyphSize))
         }
     }
 }

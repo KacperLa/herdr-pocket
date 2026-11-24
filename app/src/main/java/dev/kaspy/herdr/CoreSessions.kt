@@ -124,6 +124,10 @@ internal fun agentCardDescription(description:String?,workspace:String?,name:Str
 
 private val agentCardSeparators=Regex("[|·•]|\\s+[—–-]\\s+")
 
+/** The profile is metadata for the exact attached terminal, never a name match. */
+internal fun activeProfileRow(roster:List<CoreSession>,address:String):CoreSession? =
+    roster.singleOrNull {it.state=="live" && it.address==address}
+
 internal fun groupedLiveRoster(sessions:List<CoreSession>):Pair<List<CoreSession>, List<CoreSession>> =
     sessions.filter {it.state=="live"}.distinctBy {it.address}.partition {it.isAgent}
 
@@ -192,9 +196,11 @@ private class RosterQuery(query:String) {
 
 internal fun filteredAgentRoster(
     sessions:List<CoreSession>,query:String,filter:SpaceStatusFilter=SpaceStatusFilter.ALL,
+    pinned:Set<String> = emptySet(),
 ):List<CoreSession> {
     val matcher=RosterQuery(query)
-    val agents=priorityAgentRoster(sessions)
+    val priority=priorityAgentRoster(sessions)
+    val agents=if(pinned.isEmpty()) priority else priority.partition {it.address in pinned}.let {(top,rest)->top+rest}
     val status=filter.status
     if(matcher.isEmpty && status==null) return agents
     return agents.filter { row ->

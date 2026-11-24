@@ -13,18 +13,14 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
@@ -37,7 +33,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -52,21 +47,21 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import kotlin.math.abs
 
-private val DockBlack = Color(0xFF050505)
-private val KeySlate = Color(0xFF141719)
+private val DockBlack = Color.Black
+internal val DockTargetSize = 48.dp
+internal val DockGlyphSize = 24.dp
+internal val DockGlyphStroke = 1.9.dp
+private val DockActiveFill = Color(0xFF343B42)
 private val DisabledWhite = Color.White.copy(alpha = .38f)
 
 @Composable
@@ -110,14 +105,18 @@ internal fun TerminalDock(
                         TerminalDockIconKey(R.drawable.ic_terminal_tab,R.string.terminal_key_tab,active) {
                             if(canSend())onKey(KeyEvent.KEYCODE_TAB)
                         }
-                        TerminalKey("Esc",active,description="Escape") { if(canSend())onKey(KeyEvent.KEYCODE_ESCAPE) }
-                        TerminalModifierKey("Ctrl",active,ctrlSelected,"Control modifier") {
+                        TerminalDockIconKey(R.drawable.ic_terminal_escape,R.string.terminal_key_escape,active) {
+                            if(canSend())onKey(KeyEvent.KEYCODE_ESCAPE)
+                        }
+                        TerminalModifierKey(R.drawable.ic_terminal_control,R.string.terminal_key_control,active,ctrlSelected) {
                             if(canSend())onToggleCtrl()
                         }
-                        TerminalModifierKey("Alt",active,altSelected,"Alt modifier") {
+                        TerminalModifierKey(R.drawable.ic_terminal_alt,R.string.terminal_key_alt,active,altSelected) {
                             if(canSend())onToggleAlt()
                         }
-                        TerminalKey("/",active,description="Slash") { if(canSend())onSlash() }
+                        TerminalDockIconKey(R.drawable.ic_terminal_slash,R.string.terminal_key_slash,active) {
+                            if(canSend())onSlash()
+                        }
                         TerminalDockIconKey(R.drawable.ic_terminal_clipboard,R.string.terminal_paste_clipboard,active) {
                             directionsExpanded=false
                             if(canSend())onPaste()
@@ -131,16 +130,11 @@ internal fun TerminalDock(
                         )
                     }
                     mic()
-                    IconButton(onClick={directionsExpanded=false;onToggleKeyboard()},enabled=inputEnabled && !m.demo,modifier=Modifier.size(48.dp)) {
-                        Icon(
-                            painter=painterResource(R.drawable.ic_terminal_keyboard),
-                            contentDescription=stringResource(
-                                if(keyboardShownOrRequested) R.string.terminal_hide_keyboard else R.string.terminal_show_keyboard,
-                            ),
-                            tint=if(m.demo || !inputEnabled) DisabledWhite else Color.White,
-                            modifier=Modifier.size(24.dp),
-                        )
-                    }
+                    TerminalDockIconKey(
+                        R.drawable.ic_terminal_keyboard,
+                        if(keyboardShownOrRequested) R.string.terminal_hide_keyboard else R.string.terminal_show_keyboard,
+                        enabled=inputEnabled && !m.demo,
+                    ) {directionsExpanded=false;onToggleKeyboard()}
                 }
             }
         }
@@ -152,16 +146,16 @@ private fun TerminalDockIconKey(icon:Int,labelRes:Int,enabled:Boolean,onClick:()
     val label=stringResource(labelRes)
     Surface(
         onClick=onClick,enabled=enabled,
-        modifier=Modifier.size(48.dp).semantics {
+        modifier=Modifier.size(DockTargetSize).semantics {
             contentDescription=label
             role=Role.Button
         },
-        color=KeySlate,
+        color=DockBlack,
         contentColor=if(enabled) Color.White else DisabledWhite,
         shape=CircleShape,
     ) {
         Box(contentAlignment=Alignment.Center) {
-            Icon(painterResource(icon),contentDescription=null,modifier=Modifier.size(24.dp))
+            Icon(painterResource(icon),contentDescription=null,modifier=Modifier.size(DockGlyphSize))
         }
     }
 }
@@ -192,6 +186,8 @@ private fun DirectionKeys(
 ) {
     var buttonDown by remember(terminalIdentity,active) { mutableLongStateOf(-1000L) }
     var outsideDismissed by remember(terminalIdentity,active) { mutableLongStateOf(-2000L) }
+    val directionLabel=stringResource(R.string.terminal_directional_keys)
+    val expansionLabel=stringResource(if(expanded) R.string.terminal_directional_expanded else R.string.terminal_directional_collapsed)
     Box {
         Surface(
             onClick={
@@ -201,17 +197,18 @@ private fun DirectionKeys(
                 onExpandedChange(!expanded && !sameTap)
             },
             enabled=active,
-            modifier=Modifier.size(48.dp).pointerInput(terminalIdentity,active) {
+            modifier=Modifier.size(DockTargetSize).pointerInput(terminalIdentity,active) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed=false,pass=PointerEventPass.Initial)
                     buttonDown=SystemClock.uptimeMillis()
                 }
             }.semantics {
-                contentDescription="Directional keys"
+                contentDescription=directionLabel
                 role=Role.Button
-                stateDescription=if(expanded) "Expanded" else "Collapsed"
+                stateDescription=expansionLabel
             },
-            color=KeySlate,
+            color=if(expanded) DockActiveFill else DockBlack,
+            border=if(expanded) BorderStroke(2.dp,Color.White) else null,
             contentColor=if(active) Color.White else DisabledWhite,
             shape=CircleShape,
         ) {
@@ -225,24 +222,25 @@ private fun DirectionKeys(
                 onDismissRequest={outsideDismissed=SystemClock.uptimeMillis();onExpandedChange(false)},
                 properties=PopupProperties(focusable=false,dismissOnClickOutside=true),
             ) {
-                Surface(shape=RoundedCornerShape(18.dp),color=DockBlack,contentColor=Color.White) {
+                Surface(shape=RoundedCornerShape(18.dp),color=DockBlack,contentColor=Color.White,
+                    border=BorderStroke(1.dp,Color(0xFF686868))) {
                     Row(
                         modifier=Modifier.padding(4.dp),
                         horizontalArrangement=Arrangement.spacedBy(4.dp),
                     ) {
                         Column(verticalArrangement=Arrangement.spacedBy(4.dp)) {
                             DpadShortcutButton(DpadShortcut.HOME,active,onKey)
-                            DirectionKey("←","Left",active) {onKey(KeyEvent.KEYCODE_DPAD_LEFT)}
+                            DpadShortcutButton(DpadShortcut.LEFT,active,onKey)
                             DpadShortcutButton(DpadShortcut.END,active,onKey)
                         }
                         Column(verticalArrangement=Arrangement.spacedBy(4.dp)) {
-                            DirectionKey("↑","Up",active) {onKey(KeyEvent.KEYCODE_DPAD_UP)}
+                            DpadShortcutButton(DpadShortcut.UP,active,onKey)
                             DpadShortcutButton(DpadShortcut.ENTER,active,onKey)
-                            DirectionKey("↓","Down",active) {onKey(KeyEvent.KEYCODE_DPAD_DOWN)}
+                            DpadShortcutButton(DpadShortcut.DOWN,active,onKey)
                         }
                         Column(verticalArrangement=Arrangement.spacedBy(4.dp)) {
                             DpadShortcutButton(DpadShortcut.PAGE_UP,active,onKey)
-                            DirectionKey("→","Right",active) {onKey(KeyEvent.KEYCODE_DPAD_RIGHT)}
+                            DpadShortcutButton(DpadShortcut.RIGHT,active,onKey)
                             DpadShortcutButton(DpadShortcut.PAGE_DOWN,active,onKey)
                         }
                     }
@@ -254,7 +252,7 @@ private fun DirectionKeys(
 
 @Composable
 private fun DpadIcon(color:Color) {
-    Canvas(Modifier.size(24.dp)) {
+    Canvas(Modifier.size(DockGlyphSize)) {
         val unit=size.width/24f
         val lobe=Path().apply {
             moveTo(8.5f*unit,1.5f*unit)
@@ -266,13 +264,17 @@ private fun DpadIcon(color:Color) {
         }
         repeat(4) { quarter ->
             rotate(quarter*90f) {
-                drawPath(lobe,color,style=Stroke(width=1.2.dp.toPx(),join=StrokeJoin.Round))
+                drawPath(lobe,color,style=Stroke(width=DockGlyphStroke.toPx(),join=StrokeJoin.Round))
             }
         }
     }
 }
 
 private enum class DpadShortcut(val keyCode:Int,val label:Int) {
+    LEFT(KeyEvent.KEYCODE_DPAD_LEFT,R.string.terminal_key_left),
+    UP(KeyEvent.KEYCODE_DPAD_UP,R.string.terminal_key_up),
+    DOWN(KeyEvent.KEYCODE_DPAD_DOWN,R.string.terminal_key_down),
+    RIGHT(KeyEvent.KEYCODE_DPAD_RIGHT,R.string.terminal_key_right),
     ENTER(KeyEvent.KEYCODE_ENTER,R.string.terminal_key_enter),
     HOME(KeyEvent.KEYCODE_MOVE_HOME,R.string.terminal_key_home),
     END(KeyEvent.KEYCODE_MOVE_END,R.string.terminal_key_end),
@@ -286,16 +288,29 @@ private fun DpadShortcutButton(shortcut:DpadShortcut,enabled:Boolean,onKey:(Int)
     val ink=if(enabled) Color.White else DisabledWhite
     Surface(
         onClick={onKey(shortcut.keyCode)},enabled=enabled,
-        modifier=Modifier.size(48.dp).semantics {contentDescription=label;role=Role.Button},
-        shape=RoundedCornerShape(10.dp),color=KeySlate,contentColor=ink,
+        modifier=Modifier.size(DockTargetSize).semantics {contentDescription=label;role=Role.Button},
+        shape=CircleShape,color=DockBlack,contentColor=ink,
     ) {
         Box(contentAlignment=Alignment.Center) {
-            Canvas(Modifier.size(26.dp)) {
+            Canvas(Modifier.size(DockGlyphSize)) {
                 val unit=size.width/24f
                 fun line(x1:Float,y1:Float,x2:Float,y2:Float) {
-                    drawLine(ink,Offset(x1*unit,y1*unit),Offset(x2*unit,y2*unit),2.dp.toPx(),StrokeCap.Round)
+                    drawLine(ink,Offset(x1*unit,y1*unit),Offset(x2*unit,y2*unit),DockGlyphStroke.toPx(),StrokeCap.Round)
                 }
                 when(shortcut) {
+                    DpadShortcut.LEFT,DpadShortcut.UP,DpadShortcut.RIGHT,DpadShortcut.DOWN -> {
+                        val turn=when(shortcut) {
+                            DpadShortcut.UP -> 90f
+                            DpadShortcut.RIGHT -> 180f
+                            DpadShortcut.DOWN -> 270f
+                            else -> 0f
+                        }
+                        rotate(turn) {
+                            line(4f,12f,20f,12f)
+                            line(4f,12f,10f,6f)
+                            line(4f,12f,10f,18f)
+                        }
+                    }
                     DpadShortcut.ENTER -> {
                         line(19f,5f,19f,14f)
                         line(19f,14f,5f,14f)
@@ -329,60 +344,25 @@ private fun DpadShortcutButton(shortcut:DpadShortcut,enabled:Boolean,onKey:(Int)
 }
 
 @Composable
-private fun DirectionKey(label:String,description:String,enabled:Boolean,onClick:()->Unit) {
-    TerminalKey(
-        label,enabled,description=description,shape=RoundedCornerShape(10.dp),
-        modifier=Modifier.size(48.dp), onClick=onClick,
-    )
-}
-
-@Composable
 private fun TerminalModifierKey(
-    label:String, enabled:Boolean, armed:Boolean, description:String, onToggle:()->Unit,
+    icon:Int,labelRes:Int,enabled:Boolean,armed:Boolean,onToggle:()->Unit,
 ) {
+    val description=stringResource(labelRes)
+    val armedLabel=stringResource(if(armed) R.string.terminal_modifier_armed else R.string.terminal_modifier_off)
     Surface(
-        modifier=Modifier.widthIn(min=48.dp).heightIn(min=48.dp)
+        modifier=Modifier.size(DockTargetSize)
             .toggleable(value=armed,enabled=enabled,role=Role.Checkbox,onValueChange={onToggle()})
             .semantics {
                 contentDescription=description
-                stateDescription=if(armed) "Armed" else "Off"
+                stateDescription=armedLabel
             },
-        color=if(armed) Color(0xFF343B42) else KeySlate,
+        color=if(armed) DockActiveFill else DockBlack,
         contentColor=if(enabled) Color.White else DisabledWhite,
         border=if(armed) BorderStroke(2.dp,Color.White) else null,
         shape=CircleShape,
     ) {
-        TerminalKeyLabel(label,if(armed) FontWeight.Bold else FontWeight.Medium)
-    }
-}
-
-@Composable
-private fun TerminalKey(
-    label:String,
-    enabled:Boolean,
-    description:String=label,
-    shape:Shape=CircleShape,
-    modifier:Modifier=Modifier,
-    onClick:()->Unit,
-) {
-    Surface(
-        onClick=onClick,enabled=enabled,
-        modifier=modifier.widthIn(min=48.dp).heightIn(min=48.dp).semantics {
-            contentDescription=description
-            role=Role.Button
-        },
-        color=KeySlate,
-        contentColor=if(enabled) Color.White else DisabledWhite,
-        shape=shape,
-    ) {
-        TerminalKeyLabel(label,FontWeight.Medium)
-    }
-}
-
-@Composable
-private fun TerminalKeyLabel(label:String,weight:FontWeight) {
-    Box(Modifier.padding(horizontal=7.dp,vertical=4.dp),contentAlignment=Alignment.Center) {
-        Text(label,fontFamily=FontFamily.Monospace,fontWeight=weight,
-            fontSize=19.sp,lineHeight=23.sp,softWrap=false,maxLines=1)
+        Box(contentAlignment=Alignment.Center) {
+            Icon(painterResource(icon),contentDescription=null,modifier=Modifier.size(DockGlyphSize))
+        }
     }
 }

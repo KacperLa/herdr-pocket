@@ -32,6 +32,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -336,7 +337,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
             it.name==prefs.getString("startup_backend",null)
         } ?: AgentBackend.CORE
         if(backend==AgentBackend.TUI) tuiSessionState=prefs.getString("startup_tui_session","").orEmpty()
-        connect(list=true,autoSelect=true,automatic=true,backend=backend)
+        connect(list=true,automatic=true,backend=backend)
     }
 
     private fun saveRecentSession(target:ResumeTarget, addressKey:String, address:String) {
@@ -351,7 +352,6 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
             }
         }.apply()
     }
-    private var autoPick=false
     private var requestedAgent:String?=null
     private var attachStarted=false
     private var attachOutputSeen=false
@@ -371,38 +371,42 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
-    fun cancelPicker() { pendingColdWatchTerminal=null;showSessionPicker=false;sessions=emptyList();listedConfig=null;listedBackend=AgentBackend.CORE;listedTuiSession=null;passphrase="" }
+    fun cancelPicker() {
+        if(showSessionPicker) clearAgentSwitcher()
+        pendingColdWatchTerminal=null
+        showSessionPicker=false
+        sessions=emptyList()
+        listedConfig=null
+        listedBackend=AgentBackend.CORE
+        listedTuiSession=null
+        passphrase=""
+    }
+
     private fun publishSessionList() {
         val backend=listedBackend
         sessions=backend.parse(listBytes.toString("UTF-8"))
-        val liveCount=sessions.count { it.state=="live" }
-        if(liveCount==0) {
-            reconnectOffered=true
-            finishStartup()
-            cancelPicker()
-            status="No live ${backend.label} terminals found."
-            return
-        }
-        val cfg=listedConfig
-        val endpoint=selectedEndpoint
-        val remembered=if(cfg!=null && endpoint!=null) prefs.getString(backend.rememberedKey(endpoint,cfg.user,listedTuiSession),null) else null
         val automatic=startupInFlight
         val preferred=requestedAgent
         val watchTarget=pendingColdWatchTerminal
         pendingColdWatchTerminal=null
-        val selection=if(watchTarget!=null) sessions.singleOrNull {it.isAgent && it.state=="live" && it.address==watchTarget}
-            else if(automatic || preferred!=null) startupSession(sessions,preferred ?: remembered)
-            else if(autoPick) CoreSessions.autoAttach(sessions,remembered) else null
-        if(selection!=null) connect(attach=selection,automatic=automatic,backend=backend,tuiSessionName=listedTuiSession,
-            keepRetainedTerminal=retainedTerminal)
-        else {
+        val selection=explicitRosterSelection(sessions,watchTarget,preferred)
+        if(selection!=null) {
+            connect(attach=selection,automatic=automatic,backend=backend,tuiSessionName=listedTuiSession,
+                keepRetainedTerminal=retainedTerminal)
+        } else {
             retainedTerminal=false
             clearRetainedOutput()
             finishStartup()
             terminalVisible=false
             showSessionPicker=true
-            status=if(preferred!=null || (automatic && remembered!=null)) "The previous agent is not available. Choose a live ${backend.label} session."
-                else "Choose a live ${backend.label} session."
+            switchSessions=sessions.filter {it.state=="live"}.distinctBy {it.address}
+            showAgentSwitcher=true
+            switchMessage=when {
+                watchTarget!=null -> "That agent is no longer available in this Herdr session."
+                preferred!=null -> "The previous agent is not available. Choose a live ${backend.label} session."
+                else -> ""
+            }
+            status="Choose a live ${backend.label} session."
         }
     }
     private var listedConfig:SshConfig?=null
@@ -516,9 +520,44 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
     private data class ResumeTarget(val config:SshConfig,val key:ByteArray,val passphrase:ByteArray?,var command:String,var address:String,val backend:AgentBackend,val tuiSession:String?,var retries:Int=0) {
         fun clear() {key.fill(0);passphrase?.fill(0)}
     }
+    private val agentPins=AgentPins(
+        read={ key -> prefs.getStringSet(key,emptySet()).orEmpty() },
+        write={ key, pins -> prefs.edit().putStringSet(key,pins).apply() },
+    )
+    private var agentPinRevision by mutableIntStateOf(0)
+    private fun currentPinScope():AgentPinScope? {
+        val target=resume
+        return if(target!=null) AgentPinScope.from(target.config,target.backend,target.tuiSession)
+            else listedConfig?.takeIf {showSessionPicker}?.let {AgentPinScope.from(it,listedBackend,listedTuiSession)}
+    }
+    internal val rosterPins:Set<String> get() =
+        agentPinRevision.let { currentPinScope()?.let(agentPins::values).orEmpty() }
+
+    internal fun isAgentPinned(session:CoreSession):Boolean = session.isAgent && session.address in rosterPins
+
+    internal fun canPinAgent(session:CoreSession):Boolean {
+        if(!session.isAgent || session.state!="live" || !AgentPins.validAddress(session.address) ||
+            currentPinScope()==null) return false
+        val exactRoster=showAgentSwitcher && !switchBusy && switchSessions.any {it===session} &&
+            (showSessionPicker || canSwitchAgents && displayedPty!=null && ssh.terminalIdentity()===displayedPty)
+        val exactProfile=agentSettingsRoute?.let {currentAgentSettings(it) &&
+            activeAgentDetails===session && it.address==session.address}==true
+        if(!exactRoster && !exactProfile) return false
+        val pins=rosterPins
+        return session.address in pins || pins.size<AgentPins.MAX_PINS
+    }
+
+    internal fun toggleAgentPin(session:CoreSession) {
+        if(!canPinAgent(session)) return
+        val scope=currentPinScope() ?: return
+        if(agentPins.toggle(scope,session.address)) agentPinRevision++
+    }
+
     internal val rosterAvatarScope:AgentAvatarScope?
         get()=resume?.let {target ->
             AgentAvatarScope(target.backend.name,target.config.host,target.config.port,target.config.user,target.tuiSession)
+        } ?: listedConfig?.takeIf {showSessionPicker}?.let { config ->
+            AgentAvatarScope(listedBackend.name,config.host,config.port,config.user,listedTuiSession)
         }
 
     internal var watchNotice by mutableStateOf<String?>(null)
@@ -637,23 +676,165 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
     var switchMessage by mutableStateOf("")
         private set
     private var switchOperation by mutableStateOf<Long?>(null)
-    val switchBusy get() = switchOperation!=null
+    val switchBusy get() = switchOperation!=null || showSessionPicker && busy
     private var rosterRefresh by mutableStateOf(AgentRosterRefresh())
-    val isRefreshingAgents get()=rosterRefresh.active
+    val isRefreshingAgents get()=rosterRefresh.active || showSessionPicker && busy && listing
     val canRefreshAgents get()=canRefreshAgentRoster(
-        visible=showAgentSwitcher,connected=canSwitchAgents,hasAgentTarget=resume!=null,
+        visible=showAgentSwitcher,connected=canSwitchAgents || showSessionPicker,
+        hasAgentTarget=resume!=null || showSessionPicker && listedConfig!=null,
         operationPending=switchBusy,dialogOpen=renamingAgent!=null,
     )
     private var switchCandidate:CoreSession?=null
     val canSwitchAgents get() = activeCoreAddress!=null && busy && status=="Connected · SSH PTY"
 
     val canCreateAgent get() = resume!=null
-    val switchingTuiAgents get() = resume?.backend==AgentBackend.TUI
+    val switchingTuiAgents get() = (resume?.backend ?: listedBackend.takeIf {showSessionPicker})==AgentBackend.TUI
 
     internal var agentMenuOpen by mutableStateOf(false)
         private set
     internal var filesUi by mutableStateOf<AgentFilesUiState?>(null)
         private set
+    internal var agentSettingsOpen by mutableStateOf(false)
+        private set
+    internal var activeAgentDetails by mutableStateOf<CoreSession?>(null)
+        private set
+    internal var agentSettingsNotice by mutableStateOf<String?>(null)
+        private set
+    internal var agentSettingsLoading by mutableStateOf(false)
+        private set
+    private class AgentSettingsRoute(val pty:Any,val address:String,val target:ResumeTarget)
+    private sealed interface AgentSettingsWork {
+        data object Read : AgentSettingsWork
+        data class Verify(val location:TuiLocation,val label:String) : AgentSettingsWork
+        data class Rename(val location:TuiLocation,val label:String) : AgentSettingsWork
+    }
+    private var agentSettingsRoute:AgentSettingsRoute?=null
+    private var agentSettingsRequest:Long?=null
+    private var agentSettingsWork:AgentSettingsWork?=null
+
+    private fun currentAgentSettings(route:AgentSettingsRoute):Boolean =
+        agentSettingsRoute===route && agentSettingsOpen && agentMenuOpen && filesUi==null &&
+            displayedPty===route.pty && speechTerminalIdentity()===route.pty &&
+            activeCoreAddress==route.address && resume===route.target && route.target.address==route.address
+
+    internal val canRenameActiveAgent:Boolean get() {
+        val route=agentSettingsRoute ?: return false
+        val details=activeAgentDetails ?: return false
+        return currentAgentSettings(route) && route.target.backend==AgentBackend.TUI && !agentSettingsLoading &&
+            details.address==route.address && details.tuiLocation?.terminalId==route.address
+    }
+
+    private fun openAgentSettings() {
+        if(!agentMenuOpen || agentSettingsOpen || filesUi!=null) return
+        val target=resume ?: return
+        val pty=speechTerminalIdentity() ?: return
+        val address=activeCoreAddress?.takeIf {it==target.address} ?: return
+        val route=AgentSettingsRoute(pty,address,target)
+        agentSettingsRoute=route
+        activeAgentDetails=null
+        agentSettingsOpen=true
+        agentSettingsNotice=null
+        refreshAgentSettings()
+    }
+
+    internal fun refreshAgentSettings() {
+        val route=agentSettingsRoute ?: return
+        if(!currentAgentSettings(route) || agentSettingsLoading) return
+        beginAgentSettings(route,AgentSettingsWork.Read,
+            route.target.backend.listCommand(route.target.tuiSession))
+    }
+
+    internal fun dismissAgentSettings() {
+        // Once a verified rename is sent, keep the profile visible for its
+        // acknowledgment; abandoning the route on connection loss still works.
+        if(agentSettingsWork is AgentSettingsWork.Rename) return
+        dismissAgentMenu()
+    }
+
+    private fun clearAgentSettings() {
+        agentSettingsRequest?.let(ssh::cancelOperation)
+        if(agentSettingsOpen) renamingAgent=null
+        agentSettingsRoute=null
+        agentSettingsRequest=null
+        agentSettingsWork=null
+        activeAgentDetails=null
+        agentSettingsLoading=false
+        agentSettingsNotice=null
+        agentSettingsOpen=false
+    }
+
+    internal fun askToRenameActiveAgent() {
+        if(canRenameActiveAgent) renamingAgent=activeAgentDetails
+    }
+
+    private fun beginAgentSettings(route:AgentSettingsRoute,work:AgentSettingsWork,command:String) {
+        if(!currentAgentSettings(route) || agentSettingsRequest!=null) return
+        agentSettingsNotice=null
+        val id=ssh.listOnTransport(command)
+        if(id==null) {
+            agentSettingsNotice="The connection is busy. Try again."
+            return
+        }
+        agentSettingsWork=work
+        agentSettingsRequest=id
+        agentSettingsLoading=true
+    }
+
+    private fun acceptAgentSettings(event:SshSession.Event.OperationList) {
+        val route=agentSettingsRoute
+        val work=agentSettingsWork
+        agentSettingsRequest=null
+        agentSettingsWork=null
+        agentSettingsLoading=false
+        if(route==null || !currentAgentSettings(route)) return
+        val response=event.stdout.toString(Charsets.UTF_8)
+        val ok=event.exitStatus==0
+        when(work) {
+            AgentSettingsWork.Read -> {
+                val details=if(ok) runCatching {activeProfileRow(route.target.backend.parse(response),route.address)}.getOrNull() else null
+                activeAgentDetails=details
+                if(details!=null) agentName=details.name
+                else agentSettingsNotice="Could not read this terminal’s profile. Refresh to try again."
+            }
+            is AgentSettingsWork.Verify -> {
+                if(!ok || !TuiMutations.confirmsPane(response,work.location)) {
+                    activeAgentDetails=null
+                    agentSettingsNotice="That pane changed. Refresh before renaming."
+                    return
+                }
+                beginAgentSettings(route,AgentSettingsWork.Rename(work.location,work.label),
+                    TuiMutations.renamePane(work.location,work.label,route.target.tuiSession))
+            }
+            is AgentSettingsWork.Rename -> {
+                if(ok && TuiMutations.confirmsPane(response,work.location,work.label)) {
+                    agentName=work.label
+                    activeAgentDetails=activeAgentDetails?.copy(name=work.label)
+                    prefs.edit().putString("agent",work.label).apply()
+                    agentSettingsNotice="Pane renamed."
+                } else {
+                    activeAgentDetails=null
+                    agentSettingsNotice="Could not confirm the rename. Refresh before trying again."
+                }
+            }
+            null -> Unit
+        }
+    }
+
+    private fun failedAgentSettings() {
+        val route=agentSettingsRoute
+        val work=agentSettingsWork
+        agentSettingsRequest=null
+        agentSettingsWork=null
+        agentSettingsLoading=false
+        if(route==null || !currentAgentSettings(route)) return
+        activeAgentDetails=null
+        agentSettingsNotice=when(work) {
+            is AgentSettingsWork.Rename -> "Could not confirm the rename. Refresh before trying again."
+            is AgentSettingsWork.Verify -> "Could not verify the pane. No rename was sent."
+            else -> "Could not read this terminal’s profile. Refresh to try again."
+        }
+    }
+
     private class FilesRoute(val pty: Any, val address: String, val session: String?)
     private data class FilesRead(val parts: List<String>, val preview: Boolean = false)
     private var filesRoute: FilesRoute? = null
@@ -700,16 +881,20 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
     private var filesMkdirRequest:SshSession.FileRequest?=null
 
     internal fun openAgentMenu() {
-        if (canSwitchAgents && terminalVisible && !showAgentSwitcher) agentMenuOpen = true
+        if (canSwitchAgents && terminalVisible && !showAgentSwitcher) {
+            agentMenuOpen = true
+            openAgentSettings()
+        }
     }
 
     internal fun dismissAgentMenu() {
+        clearAgentSettings()
         closeFiles()
         agentMenuOpen = false
     }
 
     internal fun openAgentFiles() {
-        if (!agentMenuOpen || filesUi != null) return
+        if (!agentMenuOpen || agentSettingsLoading || filesUi != null) return
         val target = resume
         val address = activeCoreAddress
         val pty = speechTerminalIdentity()
@@ -1222,6 +1407,17 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
 
     fun refreshAgents():Boolean {
         if(!canRefreshAgents) return false
+        if(showSessionPicker) {
+            val previous=listedConfig ?: return false
+            val endpoint=selectedEndpoint ?: return false
+            if(previous!=SshConfig(endpoint.host,endpoint.port,user.trim(),hostTrust.pin(endpoint)) ||
+                listedBackend==AgentBackend.TUI && listedTuiSession!=tuiSession.trim().ifBlank {null}) {
+                switchMessage="Connection details changed. Connect again from Settings."
+                return false
+            }
+            connect(list=true,pinnedOnly=true,backend=listedBackend,tuiSessionName=listedTuiSession,keepColdRoster=true)
+            return busy && listing
+        }
         val target=resume ?: return false
         switchCandidate=null
         if(target.backend==AgentBackend.TUI) {
@@ -1241,6 +1437,12 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
 
     fun chooseAgent(session:CoreSession) {
         if(!showAgentSwitcher || switchBusy) return
+        if(showSessionPicker) {
+            if(session in switchSessions && session.state=="live") {
+                connect(attach=session,pinnedOnly=true,backend=listedBackend,tuiSessionName=listedTuiSession)
+            }
+            return
+        }
         when(agentSelection(session,switchSessions,activeCoreAddress.takeIf {canSwitchAgents},
             displayedPty,ssh.terminalIdentity())) {
             AgentSelection.RESUME_CURRENT -> {
@@ -1326,6 +1528,15 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         val target=resume?.takeIf {it.backend==AgentBackend.TUI} ?: return
         val selected=renamingAgent ?: return
         val location=selected.tuiLocation ?: return
+        if(agentSettingsOpen) {
+            val route=agentSettingsRoute ?: return
+            if(!canRenameActiveAgent || selected!==activeAgentDetails || selected.address!=route.address ||
+                location.terminalId!=route.address || !TuiMutations.canRename(label)) return
+            renamingAgent=null
+            beginAgentSettings(route,AgentSettingsWork.Verify(location,label),
+                TuiMutations.inspectPane(location,target.tuiSession))
+            return
+        }
         if(!showAgentSwitcher || !canSwitchAgents || switchBusy || selected !in switchSessions ||
             location.terminalId!=selected.address || !TuiMutations.canRename(label)) return
         renamingAgent=null
@@ -1381,6 +1592,22 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun dismissAgentSwitcher() {
+        if(showSessionPicker) {
+            if(busy && listing) {
+                // Cancel only this no-PTY roster refresh; the independent alert
+                // watcher may still be intentionally active for this account.
+                generation++
+                clearPendingSave()
+                ssh.disconnect()
+                busy=false
+                listing=false
+                reconnectTarget=null
+                reconnectOffered=false
+                status="Disconnected"
+            }
+            cancelPicker()
+            return
+        }
         if(coreShellCreate!=null || tuiWork!=null) return // A sent mutation cannot reliably be undone.
         val operation=switchOperation
         if(operation!=null && !ssh.cancelOperation(operation)) return // a result is already being delivered
@@ -1389,12 +1616,13 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
 
     fun connectionFromAgents() {
         if(!showAgentSwitcher || switchBusy) return
-        clearAgentSwitcher()
+        if(showSessionPicker) showAgentSwitcher=false else clearAgentSwitcher()
         terminalVisible=false
     }
 
     internal val connectionBackDestination get() =
-        if(retainedTerminal && !terminalVisible && !showSessionPicker) ConnectionBackDestination.TERMINAL
+        if(showSessionPicker && !showAgentSwitcher && !busy && listedConfig!=null) ConnectionBackDestination.AGENTS
+        else if(retainedTerminal && !terminalVisible && !showSessionPicker) ConnectionBackDestination.TERMINAL
         else connectionBackDestination(
         connected = busy && status=="Connected · SSH PTY",
         terminalVisible = terminalVisible,
@@ -1406,6 +1634,10 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
 
     internal fun returnFromConnection() {
         val destination=connectionBackDestination ?: return
+        if(showSessionPicker && destination==ConnectionBackDestination.AGENTS) {
+            showAgentSwitcher=true
+            return
+        }
         terminalVisible=true
         if(destination==ConnectionBackDestination.AGENTS) openAgentSwitcher()
     }
@@ -1540,7 +1772,9 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                         listErrors.write(event.bytes,0,minOf(event.bytes.size,8192-listErrors.size()))
                     if(!listing) renderConnectionOutput(event.bytes)
                 }
-                is SshSession.Event.OperationList -> if(filesLookup==event.id) {
+                is SshSession.Event.OperationList -> if(agentSettingsRequest==event.id) {
+                    acceptAgentSettings(event)
+                } else if(filesLookup==event.id) {
                     acceptFilesRoot(event)
                 } else if(switchOperation==event.id) {
                     val wasRoster=rosterRefresh.operationId==event.id
@@ -1575,7 +1809,9 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
                 is SshSession.Event.OperationSwitched -> acceptSwitch(event.id)
-                is SshSession.Event.OperationFailed -> if(filesLookup==event.id) {
+                is SshSession.Event.OperationFailed -> if(agentSettingsRequest==event.id) {
+                    failedAgentSettings()
+                } else if(filesLookup==event.id) {
                     filesLookup = null
                     filesUi = filesUi?.copy(loading = false, error = "Could not look up this agent’s folder. Try again.")
                 } else if(switchOperation==event.id) {
@@ -1642,7 +1878,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                     suspendCurrentTerminal()
                     reconnectOffered=probeContext==null
                     val automatic=finishStartup()
-                    clearPendingSave();probeContext=null;clearResume();rememberCandidate=null;passphrase="";listing=false;busy=false
+                    clearPendingSave();probeContext=null;clearResume();cancelPicker();rememberCandidate=null;passphrase="";listing=false;busy=false
                     status=if(automatic) "Automatic reconnect failed. ${event.message}" else event.message
                 }
             }
@@ -1693,7 +1929,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
     internal fun connect(probe:Boolean=false, list:Boolean=false, attach:CoreSession?=null, autoSelect:Boolean=false,
         automatic:Boolean=false, pinnedOnly:Boolean=false, preferredAgent:String?=null, backend:AgentBackend=AgentBackend.CORE,
         tuiSessionName:String?=tuiSession.trim().ifBlank {null},
-        keepRetainedTerminal:Boolean=false,
+        keepRetainedTerminal:Boolean=false,keepColdRoster:Boolean=false,
     ) {
         if(!automatic) noteManualConnectionAction()
         if(busy) return
@@ -1735,8 +1971,14 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         invalidateOffer()
         if(!keepRetainedTerminal) retainedTerminal=false
         clearRetainedOutput()
+        val coldRows=switchSessions.takeIf {keepColdRoster && showSessionPicker && list && !checking}
         clearResume()
-        showSessionPicker=false;attachStarted=false;attachOutputSeen=false
+        showSessionPicker=coldRows!=null
+        if(coldRows!=null) {
+            switchSessions=coldRows
+            showAgentSwitcher=true
+        }
+        attachStarted=false;attachOutputSeen=false
         rememberCandidate=if(attach!=null) backend.rememberedKey(endpoint,cfg.user,namedSession) to attach.address else null
         demo=false; busy=true; status=when {
             checking -> "Checking host key (no authentication)…"
@@ -1752,7 +1994,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         clearPendingSave()
         if(!checking && !list) passphrase=""
         listing=!checking && list
-        if(listing) {pendingColdWatchTerminal=null;autoPick=autoSelect;requestedAgent=preferredAgent;listedBackend=backend;listedTuiSession=namedSession;listedConfig=cfg;sessions=emptyList()}
+        if(listing) {pendingColdWatchTerminal=null;requestedAgent=preferredAgent;listedBackend=backend;listedTuiSession=namedSession;listedConfig=cfg;sessions=emptyList()}
         if(!list && !checking && !retainedTerminal) replaceEmulator()
         listBytes.reset();listErrors.reset()
         if(attach!=null) agentName=attach.name
@@ -1785,6 +2027,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                     if(unlocked==null) {
                         finishStartup()
                         busy=false;listing=false
+                        cancelPicker()
                         reconnectOffered=true
                         terminalVisible=false
                         clearRetainedOutput()
@@ -1805,7 +2048,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                 if(request==generation) {
                     finishStartup()
                     clearRetainedOutput()
-                    clearPendingSave();probeContext=null;clearResume();busy=false;listing=false;passphrase=""
+                    clearPendingSave();probeContext=null;clearResume();cancelPicker();busy=false;listing=false;passphrase=""
                     if(!checking && (e is SecurityException || e is FileNotFoundException)) {
                         forgetKey()
                         credentialNotice="Key access was lost. Select the file again."
@@ -1927,7 +2170,7 @@ class MainActivity : ComponentActivity() {
         handleAgentAlert(intent)
         setContent {
             LaunchedEffect(model) { model.tryStartupReconnect() }
-            MaterialTheme(colorScheme=darkColorScheme()) {
+            MaterialTheme(colorScheme=darkColorScheme(background=Color.Black,surface=Color.Black)) {
                 Surface(Modifier.fillMaxSize()) {
                     PocketScreen(model,
                         enableAgentWatch=::enableAgentWatch,
@@ -1996,103 +2239,155 @@ class MainActivity : ComponentActivity() {
     return
  }
 
- Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
-  Row(Modifier.fillMaxWidth().padding(horizontal=12.dp,vertical=4.dp),horizontalArrangement=Arrangement.SpaceBetween) {
-   val destination=m.connectionBackDestination
-   if(destination!=null) {
-    val label=stringResource(when(destination) {
-        ConnectionBackDestination.AGENTS -> R.string.back_to_agents
-        ConnectionBackDestination.TERMINAL -> R.string.back_to_terminal
-    })
-    RoundBackArrow(label,m::returnFromConnection,48.dp)
-    Spacer(Modifier.width(8.dp))
-   }
-   Text(m.agentName.ifBlank{"Agent workspace"},fontSize=22.sp,modifier=Modifier.weight(1f))
-   if(m.canReconnect) TextButton(onClick=m::reconnect) {Text(stringResource(R.string.reconnect))}
-   if(m.terminalVisible) TextButton(onClick={m.terminalVisible=false}) {Text("Connection")}
-  }
-  Text(m.status,fontSize=16.sp,modifier=Modifier.padding(horizontal=12.dp,vertical=4.dp))
-  if(m.terminalVisible) {
-   TerminalPanel(m,Modifier.weight(1f).fillMaxWidth())
-  } else {
-   Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
-    var advanced by remember { mutableStateOf(false) }
-    Text("Connect to Herdr",fontSize=22.sp)
-    AgentWatchSettings(m.canStartAgentWatch,enableAgentWatch,stopAgentWatch)
-    Field("Host or IP address",m.host,{m.host=it},!m.busy)
-    Field("SSH username",m.user,{m.user=it},!m.busy)
-    OutlinedButton(onClick=chooseKey,enabled=!m.busy){Text(if(m.keyUri==null) "Select private key file" else "Change private key file")}
-    if(m.keyUri!=null) {
-       OutlinedTextField(value=m.passphrase,onValueChange={m.passphrase=it},label={Text("Key passphrase (optional)")},
-         visualTransformation=PasswordVisualTransformation(),keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Password),
-         singleLine=true,enabled=!m.busy,modifier=Modifier.fillMaxWidth())
-       Row(
-         Modifier.fillMaxWidth().toggleable(
-            value=m.saveTypedPassphrase,enabled=!m.busy && m.keyRemembered,
-            role=Role.Checkbox,onValueChange=m::toggleRememberPassphrase),
-         verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,
-       ) {
-          Checkbox(checked=m.saveTypedPassphrase,onCheckedChange=null,
-            enabled=!m.busy && m.keyRemembered,modifier=Modifier.padding(end=12.dp))
-          Text("Remember the passphrase I enter",fontSize=16.sp)
-       }
-       if(m.hasSavedPassphrase) {
-          Text("A saved passphrase is used only with its original host, login, and key.",fontSize=16.sp)
-          TextButton(onClick={m.forgetSavedPassphrase()},enabled=!m.busy){Text("Forget saved passphrase")}
-       }
-       TextButton(onClick=m::forgetKey,enabled=!m.busy){Text("Forget key")}
+ if(m.terminalVisible) {
+    Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal=12.dp,vertical=4.dp),
+            verticalAlignment=Alignment.CenterVertically,
+        ) {
+            Text(m.agentName.ifBlank{"Terminal"},fontSize=22.sp,modifier=Modifier.weight(1f))
+            TextButton(onClick={m.terminalVisible=false}) {Text(stringResource(R.string.connection_settings))}
+        }
+        TerminalPanel(m,Modifier.weight(1f).fillMaxWidth())
     }
-    if(m.credentialNotice.isNotBlank()) Text(m.credentialNotice,fontSize=16.sp,
-       modifier=Modifier.semantics { liveRegion=LiveRegionMode.Polite })
-    Button(onClick={m.connect(list=true,backend=AgentBackend.TUI)},enabled=!m.busy,modifier=Modifier.fillMaxWidth()) {
-        Text("Connect to Herdr TUI",fontSize=20.sp)
-    }
-    OutlinedButton(onClick={m.connect(list=true,autoSelect=true)},enabled=!m.busy,modifier=Modifier.fillMaxWidth()) {
-        Text("Connect to Herdr Core")
-    }
-    if(m.busy) OutlinedButton(onClick={m.disconnect()}){Text(if(m.status=="Connected · SSH PTY") "Disconnect" else "Cancel connection")}
-    OutlinedButton(onClick={m.connect(list=true)},enabled=!m.busy,modifier=Modifier.fillMaxWidth()){Text("Choose another Core session")}
-    if(m.showSessionPicker) {
-       Text("Live ${m.listedBackend.label.removePrefix("Herdr ")} sessions",fontSize=20.sp)
-       val (agentRows,terminalRows)=groupedLiveRoster(m.sessions)
-       for((group,label) in listOf(agentRows to R.string.agent_roster_agents,terminalRows to R.string.agent_roster_terminals)) {
-          if(group.isEmpty()) continue
-          Text(stringResource(label),style=MaterialTheme.typography.titleLarge,modifier=Modifier.semantics {heading()})
-          for(session in group) {
-              if(m.listedBackend==AgentBackend.TUI) {
-                  AgentPickerRow(session,current=false,tui=true,enabled=!m.busy,
-                      onClick={m.connect(attach=session,backend=AgentBackend.TUI)})
-              } else OutlinedButton(onClick={m.connect(attach=session,backend=m.listedBackend)},enabled=!m.busy,modifier=Modifier.fillMaxWidth()) {
-                 Column(Modifier.fillMaxWidth()) {
-                     Text(session.name,fontSize=22.sp)
-                     Text("${session.address} · ${session.agent.ifBlank{"terminal"}} · ${session.status ?: session.state}",fontSize=16.sp)
-                 }
-              }
-          }
-       }
-       TextButton(onClick={m.cancelPicker()}) {Text("Cancel session selection")}
-    }
-    CoreInstallHelp()
-    if(advanced || m.status.startsWith("HOST KEY MISMATCH")) m.observedPin?.let {
-      Text("Offered by server: $it\nCompare against the server fingerprint through an independent trusted route.",fontSize=16.sp)
-    }
-    TextButton(onClick={advanced=!advanced}) {Text(if(advanced) "Hide advanced options" else "Advanced options")}
-    if(advanced) {
-      OutlinedTextField(value=m.port,onValueChange={m.port=it},label={Text("SSH port")},keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),singleLine=true,enabled=!m.busy,modifier=Modifier.fillMaxWidth())
-      Field("Herdr TUI session (blank = default)",m.tuiSession,{m.tuiSession=it},!m.busy)
-      Field("Agent / session name",m.agentName,{m.agentName=it},!m.busy)
-      Field("Custom attach command",m.command,{m.command=it},!m.busy)
-      OutlinedButton(onClick={m.connect()},enabled=!m.busy,modifier=Modifier.fillMaxWidth()){Text("Run custom attach command")}
-      OutlinedButton(onClick={m.connect(probe=true)},enabled=!m.busy){Text("Check host fingerprint")}
-      m.storedPin?.let { Text("Saved host key: $it",fontSize=16.sp) }
-      OutlinedButton(onClick={m.showDemo()},enabled=!m.busy){Text("Local Kitty image demo")}
-      Text("Choose an attach-only custom command. It runs on the SSH host. Key files are not copied. Remembered passphrases are encrypted on this device.",fontSize=16.sp)
-      Text("ConnectBot Termlib (Apache 2.0), libvterm (MIT), mwiede JSch (BSD). Licenses bundled.",fontSize=14.sp)
-    }
-   }
-  }
+    return
  }
+ ConnectionSettingsScreen(m,chooseKey,enableAgentWatch,stopAgentWatch)
 }
+
+@Composable
+private fun ConnectionSettingsScreen(
+    m:PocketModel,
+    chooseKey:()->Unit,
+    enableAgentWatch:()->Unit,
+    stopAgentWatch:()->Unit,
+) {
+    val theme=MaterialTheme.colorScheme
+    val destination=m.connectionBackDestination
+    var advanced by rememberSaveable {mutableStateOf(false)}
+    BackHandler(enabled=destination!=null,onBack=m::returnFromConnection)
+    Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
+        Box(
+            Modifier.fillMaxWidth().heightIn(min=56.dp).padding(horizontal=12.dp,vertical=4.dp),
+            contentAlignment=Alignment.Center,
+        ) {
+            if(destination!=null) {
+                val label=stringResource(when(destination) {
+                    ConnectionBackDestination.AGENTS -> R.string.back_to_agents
+                    ConnectionBackDestination.TERMINAL -> R.string.back_to_terminal
+                })
+                RoundBackArrow(label,m::returnFromConnection,48.dp,Modifier.align(Alignment.CenterStart))
+            }
+            Text(stringResource(R.string.connection_settings),style=MaterialTheme.typography.titleLarge,
+                textAlign=androidx.compose.ui.text.style.TextAlign.Center,
+                modifier=Modifier.padding(horizontal=52.dp).semantics {heading()})
+        }
+        Column(
+            Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal=16.dp,vertical=8.dp),
+            verticalArrangement=Arrangement.spacedBy(12.dp),
+        ) {
+            ConnectionSection(R.string.connection_status_section) {
+                Text(m.status,style=MaterialTheme.typography.bodyLarge,
+                    modifier=Modifier.semantics {liveRegion=LiveRegionMode.Polite})
+                if(m.canReconnect) OutlinedButton(onClick=m::reconnect) {Text(stringResource(R.string.reconnect))}
+                if(m.busy) OutlinedButton(onClick=m::disconnect) {
+                    Text(if(m.status=="Connected · SSH PTY") "Disconnect" else "Cancel connection")
+                }
+            }
+            ConnectionSection(R.string.connection_host_section) {
+                Field("Host or IP address",m.host,{m.host=it},!m.busy)
+                Field("SSH username",m.user,{m.user=it},!m.busy)
+                Button(onClick={m.connect(list=true,backend=AgentBackend.TUI)},enabled=!m.busy,
+                    modifier=Modifier.fillMaxWidth()) {Text("Connect to Herdr TUI",fontSize=18.sp)}
+                OutlinedButton(onClick={m.connect(list=true,backend=AgentBackend.CORE)},enabled=!m.busy,
+                    modifier=Modifier.fillMaxWidth()) {Text("Connect to Herdr Core")}
+            }
+            ConnectionSection(R.string.connection_keys_section) {
+                OutlinedButton(onClick=chooseKey,enabled=!m.busy){
+                    Text(if(m.keyUri==null) "Select private key file" else "Change private key file")
+                }
+                if(m.keyUri!=null) {
+                    OutlinedTextField(value=m.passphrase,onValueChange={m.passphrase=it},
+                        label={Text("Key passphrase (optional)")},
+                        visualTransformation=PasswordVisualTransformation(),
+                        keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Password),
+                        singleLine=true,enabled=!m.busy,modifier=Modifier.fillMaxWidth())
+                    Row(
+                        Modifier.fillMaxWidth().heightIn(min=48.dp).toggleable(
+                            value=m.saveTypedPassphrase,enabled=!m.busy && m.keyRemembered,
+                            role=Role.Checkbox,onValueChange=m::toggleRememberPassphrase),
+                        verticalAlignment=Alignment.CenterVertically,
+                    ) {
+                        Checkbox(checked=m.saveTypedPassphrase,onCheckedChange=null,
+                            enabled=!m.busy && m.keyRemembered,modifier=Modifier.padding(end=12.dp))
+                        Text("Remember the passphrase I enter",style=MaterialTheme.typography.bodyLarge)
+                    }
+                    if(m.hasSavedPassphrase) {
+                        Text("A saved passphrase is used only with its original host, login, and key.",
+                            style=MaterialTheme.typography.bodyMedium,color=theme.onSurfaceVariant)
+                        TextButton(onClick={m.forgetSavedPassphrase()},enabled=!m.busy) {Text("Forget saved passphrase")}
+                    }
+                    TextButton(onClick=m::forgetKey,enabled=!m.busy) {Text("Forget key")}
+                }
+                if(m.credentialNotice.isNotBlank()) Text(m.credentialNotice,style=MaterialTheme.typography.bodyLarge,
+                    modifier=Modifier.semantics {liveRegion=LiveRegionMode.Polite})
+            }
+            ConnectionSection(R.string.connection_verify_section) {
+                m.storedPin?.let { pin ->
+                    Text(stringResource(R.string.connection_saved_host_pin,pin),style=MaterialTheme.typography.bodyLarge)
+                } ?: Text(stringResource(R.string.connection_no_saved_host_pin),
+                    style=MaterialTheme.typography.bodyMedium,color=theme.onSurfaceVariant)
+                m.observedPin?.let { pin ->
+                    Text(stringResource(R.string.connection_offered_host_pin,pin),style=MaterialTheme.typography.bodyLarge)
+                    Text(stringResource(R.string.connection_compare_host_pin),style=MaterialTheme.typography.bodyMedium,
+                        color=theme.onSurfaceVariant)
+                }
+                OutlinedButton(onClick={m.connect(probe=true)},enabled=!m.busy) {Text("Check host fingerprint")}
+            }
+            ConnectionSection(R.string.connection_alerts_section) {
+                AgentWatchSettings(m.canStartAgentWatch,enableAgentWatch,stopAgentWatch)
+            }
+            ConnectionSection(R.string.connection_advanced_section) {
+                TextButton(onClick={advanced=!advanced}) {
+                    Text(stringResource(if(advanced) R.string.connection_hide_advanced else R.string.connection_show_advanced))
+                }
+                if(advanced) {
+                    OutlinedTextField(value=m.port,onValueChange={m.port=it},label={Text("SSH port")},
+                        keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),singleLine=true,
+                        enabled=!m.busy,modifier=Modifier.fillMaxWidth())
+                    Field("Herdr TUI session (blank = default)",m.tuiSession,{m.tuiSession=it},!m.busy)
+                    Field("Agent / session name",m.agentName,{m.agentName=it},!m.busy)
+                    Field("Custom attach command",m.command,{m.command=it},!m.busy)
+                    OutlinedButton(onClick={m.connect()},enabled=!m.busy,modifier=Modifier.fillMaxWidth()) {
+                        Text("Run custom attach command")
+                    }
+                    Text("Choose an attach-only custom command. It runs on the SSH host.",
+                        style=MaterialTheme.typography.bodyMedium,color=theme.onSurfaceVariant)
+                    CoreInstallHelp()
+                    OutlinedButton(onClick=m::showDemo,enabled=!m.busy) {Text("Local Kitty image demo")}
+                    Text("ConnectBot Termlib (Apache 2.0), libvterm (MIT), mwiede JSch (BSD). Licenses bundled.",
+                        style=MaterialTheme.typography.bodySmall,color=theme.onSurfaceVariant)
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+}
+
+@Composable
+private fun ConnectionSection(title:Int,content:@Composable androidx.compose.foundation.layout.ColumnScope.()->Unit) {
+    Surface(
+        modifier=Modifier.fillMaxWidth(),shape=RoundedCornerShape(16.dp),
+        color=MaterialTheme.colorScheme.surfaceVariant.copy(alpha=0.45f),
+    ) {
+        Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+            Text(stringResource(title),style=MaterialTheme.typography.titleMedium,
+                modifier=Modifier.semantics {heading()})
+            content()
+        }
+    }
+}
+
 @Composable private fun TerminalPanel(
     m:PocketModel, modifier:Modifier, suspended:Boolean=false, overlay:@Composable BoxScope.()->Unit = {},
 ) {
@@ -2434,7 +2729,12 @@ private data class PendingTerminalLink(val target:TerminalWebLink,val route:Remo
             files != null -> AgentFilesExplorer(files,m::openFilesEntry,m::backInFiles,m::retryFiles,onDownload=saveFile,onUpload=uploadFile,
                 onDeleteEntry=m::askDeleteFilesEntry,onConfirmDelete=m::confirmFilesDelete,onCancelDelete=m::cancelFilesDelete,
                 onNewFolder=m::askNewFilesFolder,onConfirmNewFolder=m::confirmNewFilesFolder,onCancelNewFolder=m::cancelNewFilesFolder)
-            menuOpen -> AgentMenuScreen(m.agentName,m::openAgentFiles,m::dismissAgentMenu)
+            menuOpen -> {
+                AgentMenuScreen(m.activeAgentDetails?.name ?: m.agentName,m.activeAgentDetails,m.rosterAvatarScope,
+                    m.canRenameActiveAgent,m.agentSettingsLoading,m.agentSettingsNotice,
+                    m::askToRenameActiveAgent,m::refreshAgentSettings,m::openAgentFiles,m::dismissAgentSettings)
+                m.renamingAgent?.let {RenameAgentDialog(m,it,agentSettings=true)}
+            }
         }
     }
 }
@@ -2472,6 +2772,9 @@ private val HeaderControlInk=Color.White
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
+// LazyRow applies alignment only to content with spare width; overflow stays scrollable.
+internal val pinnedStripArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
+
 @Composable private fun AgentSwitcher(
     m:PocketModel,
     rosterView:AgentRosterView,
@@ -2497,9 +2800,12 @@ private val HeaderControlInk=Color.White
     var search by rememberSaveable {mutableStateOf("")}
     var statusFilter by rememberSaveable {mutableStateOf(SpaceStatusFilter.ALL)}
     val isFiltered=search.isNotBlank() || statusFilter!=SpaceStatusFilter.ALL
-    val agentRows=remember(sessions,isAgents,search,statusFilter) {
-        if(isAgents) filteredAgentRoster(sessions,search,statusFilter) else emptyList()
+    val pins=m.rosterPins
+    val agentRows=remember(sessions,isAgents,search,statusFilter,pins) {
+        if(isAgents) filteredAgentRoster(sessions,search,statusFilter,pins) else emptyList()
     }
+    val (pinnedAgents,ordinaryAgents)=remember(agentRows,pins) {agentRows.partition {it.address in pins}}
+    val pinnedStripLabel=stringResource(R.string.roster_agent_pinned_strip)
     val workspaces=remember(sessions,isAgents,search,statusFilter) {
         if(isAgents) emptyList() else filteredSpacesRoster(sessions,search,statusFilter)
     }
@@ -2544,7 +2850,17 @@ private val HeaderControlInk=Color.White
                         if(agentRows.isEmpty() && !m.isRefreshingAgents) item(key="empty-agents") {
                             RosterEmptyMessage(if(isFiltered) R.string.agent_roster_no_matches else R.string.agent_roster_empty_agents)
                         }
-                        rosterRows(m,agentRows)
+                        if(pinnedAgents.isNotEmpty()) item(key="pinned-agents") {
+                            LazyRow(
+                                Modifier.fillMaxWidth().semantics {contentDescription=pinnedStripLabel},
+                                horizontalArrangement=pinnedStripArrangement,
+                            ) {
+                                items(pinnedAgents,key={it.address}) { session ->
+                                    AgentRosterRow(m,session,spacesMode=false,pinnedTile=true)
+                                }
+                            }
+                        }
+                        rosterRows(m,ordinaryAgents)
                     } else {
                         if(workspaces.isEmpty() && !m.isRefreshingAgents) item(key="empty-spaces") {
                             RosterEmptyMessage(if(isFiltered) R.string.agent_roster_no_matches else R.string.agent_roster_empty_spaces)
@@ -2650,18 +2966,25 @@ private val HeaderControlInk=Color.White
 
 private fun LazyListScope.rosterRows(m:PocketModel,rows:List<CoreSession>,spacesMode:Boolean=false) {
     items(rows,key={ "terminal:${it.address}" }) { session ->
-        AgentPickerRow(
-            session=session,
-            current=session.address==m.activeCoreAddress,
-            tui=m.switchingTuiAgents,
-            enabled=!m.switchBusy,
-            onClick={m.chooseAgent(session)},
-            onLongClick=if(m.switchingTuiAgents && session.tuiLocation!=null) {{m.askToRename(session)}} else null,
-            spacesMode=spacesMode,
-            compactAgent=!spacesMode,
-            avatarScope=m.rosterAvatarScope,
-        )
+        AgentRosterRow(m,session,spacesMode)
     }
+}
+
+@Composable private fun AgentRosterRow(m:PocketModel,session:CoreSession,spacesMode:Boolean,pinnedTile:Boolean=false) {
+    AgentPickerRow(
+        session=session,
+        current=session.address==m.activeCoreAddress,
+        tui=m.switchingTuiAgents,
+        enabled=!m.switchBusy,
+        onClick={m.chooseAgent(session)},
+        onRename=if(m.canSwitchAgents && m.switchingTuiAgents && session.tuiLocation!=null) {{m.askToRename(session)}} else null,
+        onTogglePin=if(m.canPinAgent(session)) {{m.toggleAgentPin(session)}} else null,
+        pinned=m.isAgentPinned(session),
+        pinnedTile=pinnedTile,
+        spacesMode=spacesMode,
+        compactAgent=!spacesMode,
+        avatarScope=m.rosterAvatarScope,
+    )
 }
 
 @Composable private fun RosterSearchBar(
@@ -2773,11 +3096,11 @@ private fun SpaceStatusFilter.labelResource(agentsOnly:Boolean):Int = when(this)
         color=MaterialTheme.colorScheme.onSurfaceVariant,modifier=Modifier.padding(horizontal=4.dp,vertical=8.dp))
 }
 
-@Composable private fun RenameAgentDialog(m:PocketModel,session:CoreSession) {
+@Composable private fun RenameAgentDialog(m:PocketModel,session:CoreSession,agentSettings:Boolean=false) {
     var label by remember(session.address) {mutableStateOf(session.name)}
     AlertDialog(
         onDismissRequest=m::cancelRename,
-        title={Text("Rename pane")},
+        title={Text(if(agentSettings) stringResource(R.string.agent_settings_edit_name) else "Rename pane")},
         text={
             Column(verticalArrangement=Arrangement.spacedBy(8.dp)) {
                 Text("This changes only this pane’s label in Herdr. Its tab, workspace and agent ID stay the same.")
@@ -2786,7 +3109,7 @@ private fun SpaceStatusFilter.labelResource(agentsOnly:Boolean):Int = when(this)
         },
         confirmButton={
             TextButton(onClick={m.renameAgent(label.trim())},
-                enabled=TuiMutations.canRename(label.trim()) && label.trim()!=session.name) {Text("Rename pane")}
+                enabled=TuiMutations.canRename(label.trim()) && label.trim()!=session.name) {Text(if(agentSettings) stringResource(R.string.agent_settings_save_name) else "Rename pane")}
         },
         dismissButton={TextButton(onClick=m::cancelRename){Text("Cancel")}},
     )

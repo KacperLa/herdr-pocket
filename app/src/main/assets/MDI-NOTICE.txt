@@ -1,0 +1,5 @@
+Pictogrammers Material Design Icons, SVG distribution v7.4.47
+https://github.com/Templarian/MaterialDesign-SVG/tree/v7.4.47
+Distributed under Apache License 2.0; see MDI-LICENSE.txt.
+Used eight emoticon variants also present in the Nerd Fonts nf-md set.
+The SVG containers were converted to Android VectorDrawables, retaining exact path geometry.

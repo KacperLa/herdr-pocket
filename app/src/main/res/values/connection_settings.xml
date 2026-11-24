@@ -4,4 +4,16 @@
     <string name="back_to_terminal">Back to terminal</string>
     <string name="agents_pane_title">Agents</string>
     <string name="reconnect">Reconnect</string>
+    <string name="connection_status_section">Connection status</string>
+    <string name="connection_host_section">Connect to Herdr</string>
+    <string name="connection_keys_section">SSH key management</string>
+    <string name="connection_verify_section">Host fingerprint verification</string>
+    <string name="connection_alerts_section">Agent alerts</string>
+    <string name="connection_advanced_section">Advanced</string>
+    <string name="connection_show_advanced">Show advanced options</string>
+    <string name="connection_hide_advanced">Hide advanced options</string>
+    <string name="connection_saved_host_pin">Saved SSH host fingerprint: %1$s</string>
+    <string name="connection_no_saved_host_pin">No trusted fingerprint is saved for this host and port.</string>
+    <string name="connection_offered_host_pin">Offered by server: %1$s</string>
+    <string name="connection_compare_host_pin">Compare this fingerprint with the server’s fingerprint through a trusted route.</string>
 </resources>
