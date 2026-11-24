@@ -84,7 +84,7 @@ internal fun TerminalDock(
     var directionsExpanded by remember(terminalIdentity,active) { mutableStateOf(false) }
     fun canSend()=active && m.speechTerminalIdentity()===terminalIdentity
     BackHandler(enabled=directionsExpanded) { directionsExpanded=false }
-    TerminalDictationControls(enabled=inputEnabled && m.dictationEnabled && m.liveVoice.phase==LiveVoiceUiPhase.IDLE,terminalIdentity=m::speechTerminalIdentity,send=m::sendDictation,
+    TerminalDictationControls(enabled=inputEnabled && m.dictationEnabled,terminalIdentity=m::speechTerminalIdentity,send=m::sendDictation,
         onExclusiveDock={directionsExpanded=false}) { mic ->
         Surface(
             modifier=Modifier.fillMaxWidth().padding(horizontal=8.dp,vertical=5.dp),
@@ -130,7 +130,6 @@ internal fun TerminalDock(
                             terminalIdentity=terminalIdentity,
                         )
                     }
-                    if(m.liveVoice.routeIdentity()!=null) LiveVoiceDockControl(m.liveVoice,inputEnabled)
                     mic()
                     TerminalDockIconKey(
                         R.drawable.ic_terminal_keyboard,
