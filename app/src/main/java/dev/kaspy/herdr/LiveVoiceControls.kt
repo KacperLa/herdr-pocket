@@ -1,6 +1,7 @@
 package dev.kaspy.herdr
 
 import android.animation.ValueAnimator
+import android.media.AudioManager
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
@@ -8,6 +9,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
@@ -125,6 +127,20 @@ internal enum class LiveVoiceUiPhase { IDLE, CONNECTING, LISTENING, SPEAKING }
         if(voice.phase!=LiveVoiceUiPhase.IDLE && visible!=null) {
             while(voice.routeIdentity()===visible) kotlinx.coroutines.delay(100)
             voice.stop()
+        }
+    }
+    if(voice.phase==LiveVoiceUiPhase.LISTENING || voice.phase==LiveVoiceUiPhase.SPEAKING) {
+        val label=stringResource(R.string.live_voice_speaker)
+        val status=stringResource(if(voice.speakerphone) R.string.live_voice_speaker_on else R.string.live_voice_speaker_auto)
+        Surface(shape=CircleShape,color=if(voice.speakerphone) Color.White else Color.Transparent,
+            modifier=Modifier.size(48.dp)
+                .toggleable(value=voice.speakerphone,enabled=visible!=null,role=Role.Switch) {
+                    voice.toggleSpeakerphone(context.getSystemService(AudioManager::class.java))
+                }.semantics {contentDescription=label;stateDescription=status}) {
+            Box(contentAlignment=Alignment.Center) {
+                Icon(painterResource(R.drawable.ic_live_voice_speaker),contentDescription=null,
+                    tint=if(voice.speakerphone) Color.Black else Color.White,modifier=Modifier.size(24.dp))
+            }
         }
     }
     LiveVoiceToolbarButton(visible!=null,voice.phase,voice.level) {

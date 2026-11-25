@@ -7,19 +7,30 @@ internal class LiveTurnExtraction(
     private val request:suspend (instructions:String,input:JSONObject)->JSONObject?,
 ) {
     enum class Kind { QUESTION, COMPLETION, NONE, UNKNOWN }
-    data class Observation(val kind:Kind,val draft:String?=null,val evidence:String?=null)
+    data class Observation(
+        val kind:Kind,val draft:String?=null,val evidence:String?=null,
+        val problem:LiveExtractionClient.Problem?=null,
+    )
 
     suspend fun inspect(before:String,after:String,submitted:String,completed:Boolean):Observation {
         val input=JSONObject().put("before",before).put("screen",after)
             .put("submitted",submitted).put("completed_lifecycle",completed)
-        val detection=request(DETECT,input) ?: return Observation(Kind.UNKNOWN)
-        return when(detection.opt("kind")) {
-            "question" -> question(request(QUESTION,input),after)
-            "completion" -> if(!completed) Observation(Kind.NONE)
-                else if(before.isBlank() || after.isBlank() || normalize(before)==normalize(after)) Observation(Kind.UNKNOWN)
-                else completion(request(COMPLETION,input),before,after,submitted)
-            "none" -> Observation(Kind.NONE)
-            else -> Observation(Kind.UNKNOWN)
+        var detectedQuestion=false
+        return try {
+            val detection=request(DETECT,input)
+            when(detection?.opt("kind")) {
+                "question" -> {
+                    detectedQuestion=true
+                    question(request(QUESTION,input),after)
+                }
+                "completion" -> if(!completed) Observation(Kind.NONE)
+                    else if(before.isBlank() || after.isBlank() || normalize(before)==normalize(after)) Observation(Kind.UNKNOWN)
+                    else completion(request(COMPLETION,input),before,after,submitted)
+                "none" -> Observation(Kind.NONE)
+                else -> Observation(Kind.UNKNOWN,problem=LiveExtractionClient.Problem.INVALID_REPLY)
+            }
+        } catch(failure:LiveExtractionClient.Failure) {
+            Observation(if(detectedQuestion) Kind.QUESTION else Kind.UNKNOWN,problem=failure.problem)
         }
     }
 

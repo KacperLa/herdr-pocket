@@ -18,6 +18,14 @@ class LiveExtractionClientTest {
         assertNull(LiveExtractionClient.endpoint("http://example.test/chat/completions"))
         assertNull(LiveExtractionClient.endpoint("https://example.test/chat/completions?key=secret"))
     }
+    @Test fun statusDiagnosticsDistinguishAuthRouteAndContract() {
+        assertNull(LiveExtractionClient.problem(200))
+        assertEquals(LiveExtractionClient.Problem.AUTH,LiveExtractionClient.problem(401))
+        assertEquals(LiveExtractionClient.Problem.ROUTE,LiveExtractionClient.problem(404))
+        assertEquals(LiveExtractionClient.Problem.ROUTE,LiveExtractionClient.problem(302))
+        assertEquals(LiveExtractionClient.Problem.CONTRACT,LiveExtractionClient.problem(422))
+        assertEquals(LiveExtractionClient.Problem.UNAVAILABLE,LiveExtractionClient.problem(429))
+    }
     @Test fun rejectsIncompleteAndToolResponse() {
         assertEquals("question",LiveExtractionClient.result(
             """{"choices":[{"finish_reason":"stop","message":{"content":"{\"kind\":\"question\"}"}}]}""")?.getString("kind"))

@@ -1,6 +1,7 @@
 package dev.kaspy.herdr
 
 import android.annotation.SuppressLint
+import android.media.AudioManager
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioRecord
@@ -32,6 +33,7 @@ internal class LiveVoiceEngine(
     private val socket=LiveVoiceSocket()
     private val chunks=LiveAudioQueue()
     private val audioGate=Any()
+    private var speakerRoute:LiveVoiceSpeakerRoute?=null
     private val capture=AtomicReference<AudioRecord?>()
     private val playback=AtomicReference<AudioTrack?>()
     private val playing=AtomicBoolean()
@@ -221,6 +223,12 @@ internal class LiveVoiceEngine(
         } else throw IOException("Voice session is not active")
     }
 
+    fun setSpeakerphone(audio:AudioManager,enabled:Boolean):Boolean = synchronized(audioGate) {
+        if(!ready.get() || closed.get() || finishing.get()) return@synchronized false
+        val route=speakerRoute ?: LiveVoiceSpeakerRoute(AndroidLiveVoiceSpeakerOutput(audio)).also {speakerRoute=it}
+        route.setEnabled(enabled)
+    }
+
     /** User Stop can finalize briefly; stale route/background must use force-close instead. */
     fun finish() {
         if(!ready.get()) {close();return}
@@ -252,6 +260,7 @@ internal class LiveVoiceEngine(
             runCatching {capture.get()?.stop()}
             runCatching {playback.get()?.pause()}
             runCatching {playback.get()?.flush()}
+            speakerRoute?.endCall()
         }
     }
 

@@ -77,7 +77,8 @@ class LiveVoiceWireTest {
                         frame(output,"""{"type":"session.output_audio.cleared","epoch":2}""")
                     }
                     for(content in listOf("""{"kind":"completion"}""",
-                        """{"speech":"Seven checks passed.","evidence":"All seven checks passed."}""")) {
+                        """{"speech":"Seven checks passed.","evidence":"All seven checks passed."}""",
+                        """{"ok":true}""")) {
                         serverSocket.accept().use { peer ->
                             peer.soTimeout=8000
                             val input=peer.getInputStream()
@@ -89,7 +90,11 @@ class LiveVoiceWireTest {
                             assertEquals("fixture-model",message.getString("model"))
                             assertFalse(message.has("tools"))
                             val terminal=JSONObject(message.getJSONArray("messages").getJSONObject(1).getString("content"))
-                            assertEquals("All seven checks passed.",terminal.getString("screen"))
+                            if(content=="""{"ok":true}""") {
+                                assertEquals("synthetic",terminal.getString("check"))
+                                assertFalse(terminal.has("screen"))
+                                assertFalse(terminal.has("submitted"))
+                            } else assertEquals("All seven checks passed.",terminal.getString("screen"))
                             val data=JSONObject().put("choices",JSONArray().put(JSONObject().put("finish_reason","stop").put(
                                 "message",JSONObject().put("content",content)))).toString().toByteArray()
                             peer.getOutputStream().apply {
@@ -116,6 +121,9 @@ class LiveVoiceWireTest {
                 val extraction=LiveExtractionClient.create("https://$base/v1/chat/completions","fixture-model","extraction-fixture")
                 val result=runBlocking {extraction.inspect("Previous reply","All seven checks passed.","Check unit tests",true)}
                 assertEquals("Seven checks passed.",result.draft)
+                assertNull(runBlocking {
+                    LiveExtractionClient.check("https://$base/v1/chat/completions","fixture-model","extraction-fixture")
+                })
                 serve.get(10,TimeUnit.SECONDS)
             }
         } finally {

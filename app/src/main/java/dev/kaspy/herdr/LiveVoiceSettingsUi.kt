@@ -13,6 +13,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -54,6 +57,14 @@ internal fun LiveVoiceServiceSettings(voice:PocketLiveVoice) {
         key="";extractorKey=""
     },enabled=LiveVoiceProtocol.normalizeEndpoint(endpoint.trim())!=null &&
         LiveExtractionClient.endpoint(extractor.trim())!=null && LiveExtractionClient.validModel(model.trim())) {Text("Save Live Voice settings")}
+    val extractionMatchesSaved=extractor.trim()==voice.extractorUrl && model.trim()==voice.extractorModel &&
+        extractorKey.isEmpty() && voice.extractorUrl.isNotEmpty()
+    TextButton(onClick=voice::testSavedExtraction,enabled=extractionMatchesSaved && !voice.extractionChecking) {
+        Text(if(voice.extractionChecking) "Testing extraction…" else "Test saved extraction")
+    }
+    voice.extractionCheckResult?.let {
+        Text(it,modifier=Modifier.semantics {liveRegion=LiveRegionMode.Polite})
+    }
     if(voice.endpoint!=null) TextButton(onClick={voice.clearConfiguration()}) {Text("Remove Live Voice settings and keys")}
 }
 

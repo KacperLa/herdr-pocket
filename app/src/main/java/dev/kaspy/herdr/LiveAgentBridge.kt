@@ -164,7 +164,9 @@ internal object LiveAgentHerdr {
                                 question=true,evidence=observed.evidence)
                             if(observed.kind==LiveTurnExtraction.Kind.COMPLETION)
                                 return Result("Herdr reported completion.",observed.draft,settled,evidence=observed.evidence)
-                            return Result("Herdr stopped working, but Pocket could not verify a fresh reply. Check the terminal.")
+                            return Result(observed.problem?.let {
+                                "Herdr stopped working. "+it.explanation+" Check the terminal for the reply."
+                            } ?: "Herdr stopped working, but Pocket could not verify a fresh reply. Check the terminal.")
                         }
                         if(mayHaveActiveMenu(settled.screen)) return Result(
                             "The terminal appears to be waiting for a choice. Review it directly; Pocket did not approve anything.")

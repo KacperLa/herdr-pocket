@@ -112,7 +112,9 @@ structured JSON responses, and its bearer key if needed. The extraction and
 voice services can be on the same trusted host, but they use different APIs
 and credentials. Saved credentials are encrypted with Android Keystore and
 bound to the configured endpoint. Editing a URL does not move its saved key
-to the new endpoint.
+to the new endpoint. Use **Test saved extraction** to check its URL, key and
+JSON mode with synthetic text before opening a call. The stock FOSS-Live
+server is the Live endpoint, not a Chat Completions endpoint.
 
 Open a recognized Herdr TUI agent and tap the waveform. The start dialog shows
 which service receives microphone audio and which receives visible terminal

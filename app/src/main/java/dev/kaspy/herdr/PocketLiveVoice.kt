@@ -1,6 +1,7 @@
 package dev.kaspy.herdr
 
 import android.content.SharedPreferences
+import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
 import androidx.compose.runtime.getValue
@@ -47,6 +48,8 @@ internal class PocketLiveVoice(
         private set
     var phase by mutableStateOf(LiveVoiceUiPhase.IDLE)
         private set
+    var speakerphone by mutableStateOf(false)
+        private set
     var level by mutableFloatStateOf(0f)
         private set
     var notice by mutableStateOf<String?>(null)
@@ -67,6 +70,35 @@ internal class PocketLiveVoice(
     var settingsSaved by mutableStateOf(false)
         private set
 
+    var extractionChecking by mutableStateOf(false)
+        private set
+    var extractionCheckResult by mutableStateOf<String?>(null)
+        private set
+    private var extractionCheckJob:Job?=null
+
+    fun testSavedExtraction() {
+        val url=extractorUrl
+        val model=extractorModel
+        if(extractionChecking || LiveExtractionClient.endpoint(url)==null || !LiveExtractionClient.validModel(model)) return
+        val record=prefs.getString("live_extractor_bearer",null)
+        extractionChecking=true
+        extractionCheckResult=null
+        extractionCheckJob=scope.launch {
+            try {
+                val bearer=withContext(Dispatchers.IO) {LiveSecretStore.open(extractorScope(url),record)}
+                extractionCheckResult=if(record!=null && bearer==null) "Could not unlock the extraction key. Re-enter it and save."
+                else LiveExtractionClient.check(url,model,bearer)?.explanation ?: "Extraction test passed. No terminal text was sent."
+            } finally {extractionChecking=false}
+        }
+    }
+
+    private fun resetExtractionCheck() {
+        extractionCheckJob?.cancel()
+        extractionCheckJob=null
+        extractionChecking=false
+        extractionCheckResult=null
+    }
+
     private fun voiceScope(profile:LiveVoiceProfile,url:String)="voice\n${profile.name}\n$url"
     private fun extractorScope(url:String)="extractor\n$url"
 
@@ -86,6 +118,7 @@ internal class PocketLiveVoice(
             return
         }
         stop()
+        resetExtractionCheck()
         val saved=prefs.edit().putString("live_profile",profile.name).putString("live_relay_endpoint",normalized)
             .putString("live_bearer",actualKey).putString("live_extractor_endpoint",extractor)
             .putString("live_extractor_model",model).putString("live_extractor_bearer",actualExtractor).commit()
@@ -99,6 +132,7 @@ internal class PocketLiveVoice(
 
     fun clearConfiguration() {
         stop()
+        resetExtractionCheck()
         prefs.edit().remove("live_profile").remove("live_relay_endpoint").remove("live_bearer")
             .remove("live_extractor_endpoint").remove("live_extractor_model").remove("live_extractor_bearer").commit()
         profile=LiveVoiceProfile.RELAY_TICKET
@@ -261,7 +295,17 @@ internal class PocketLiveVoice(
                                 ask(active,PocketLiveReview(event.id,PocketLiveReview.Kind.QUESTION,question,check.evidence))
                                 else null
                             if(speech!=null && active.route.isCurrent(before)) say(active,event.id,speech)
-                            else say(active,event.id,"Pocket could not confirm the agent was ready for a new prompt. Nothing was sent. Check the terminal.")
+                            else {
+                                val message=when {
+                                    !before.status.ready || check.kind==LiveTurnExtraction.Kind.QUESTION ||
+                                        LiveAgentHerdr.mayHaveActiveMenu(before.screen) ->
+                                        "The agent is waiting for input or approval. Open the terminal to respond. No prompt was sent."
+                                    else -> (check.problem?.explanation
+                                        ?: "The extractor could not determine whether this terminal was ready.")+" No prompt was sent."
+                                }
+                                notice=message
+                                say(active,event.id,message)
+                            }
                             return@launch
                         }
                         val prompt=ask(active,PocketLiveReview(event.id,PocketLiveReview.Kind.PROMPT,draft))?.trim()
@@ -342,12 +386,23 @@ internal class PocketLiveVoice(
         notice=message
     }
 
+    fun toggleSpeakerphone(audio:AudioManager?) {
+        val active=lease ?: return
+        if((phase!=LiveVoiceUiPhase.LISTENING && phase!=LiveVoiceUiPhase.SPEAKING) ||
+            !active.anchor.same(currentAnchor())) return
+        val requested=!speakerphone
+        if(audio!=null && active.engine?.setSpeakerphone(audio,requested)==true) speakerphone=requested
+        else notice=if(requested) "Pocket couldn’t switch to the phone speaker."
+            else "Pocket couldn’t restore the default call audio route."
+    }
+
     fun stop(finish:Boolean=false) {
         ticketAnchor=null
         review=null
         val active=lease
         lease=null
         phase=LiveVoiceUiPhase.IDLE
+        speakerphone=false
         level=0f
         active?.operation?.first?.let(ssh::cancelOperation)
         active?.response?.cancel()

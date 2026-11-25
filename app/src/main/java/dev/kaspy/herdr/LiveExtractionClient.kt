@@ -8,6 +8,36 @@ import java.net.URI
 import javax.net.ssl.HttpsURLConnection
 
 internal object LiveExtractionClient {
+    enum class Problem(val explanation:String) {
+        AUTH("The extraction service rejected its API key."),
+        ROUTE("The extraction URL or model was not found. Check the full Chat Completions URL and model name."),
+        CONTRACT("The extraction service rejected the request. Check the model name and Chat Completions JSON mode support."),
+        UNAVAILABLE("The extraction service is unavailable or rate limited. Try again when it is ready."),
+        INVALID_REPLY("The extraction model did not return the expected JSON response."),
+        TIMEOUT("The extraction service timed out."),
+        CONNECTION("Pocket could not reach the extraction service over HTTPS."),
+    }
+
+    class Failure(val problem:Problem):Exception()
+
+    fun problem(status:Int):Problem? = when(status) {
+        200 -> null
+        401,403 -> Problem.AUTH
+        404,405 -> Problem.ROUTE
+        429,in 500..599 -> Problem.UNAVAILABLE
+        in 300..399 -> Problem.ROUTE
+        else -> Problem.CONTRACT
+    }
+
+    suspend fun check(url:String,model:String,bearer:String?):Problem? {
+        return try {
+            val response=transport(url,model,bearer).invoke(
+                "This is a connectivity check. Return one JSON object with the Boolean key ok set to true. Do not call tools.",
+                JSONObject().put("check","synthetic"))
+            if(response.opt("ok")==true) null else Problem.INVALID_REPLY
+        } catch(failure:Failure) {failure.problem}
+    }
+
     fun endpoint(value:String):URI? = runCatching {
         require(value.length in 1..2048 && value.all {it.code in 33..126})
         URI(value).also {
@@ -42,10 +72,12 @@ internal object LiveExtractionClient {
         JSONObject(content)
     }.getOrNull()
 
-    fun create(url:String,model:String,bearer:String?):LiveTurnExtraction {
+    fun create(url:String,model:String,bearer:String?)=LiveTurnExtraction(transport(url,model,bearer))
+
+    private fun transport(url:String,model:String,bearer:String?):suspend (String,JSONObject)->JSONObject {
         val target=requireNotNull(endpoint(url))
         require(validModel(model) && (bearer==null || validKey(bearer)))
-        return LiveTurnExtraction { instructions,input ->
+        return { instructions,input ->
             withContext(Dispatchers.IO) {
                 try {
                     val connection=target.toURL().openConnection() as HttpsURLConnection
@@ -61,11 +93,15 @@ internal object LiveExtractionClient {
                         val payload=body(model,instructions,input).toString().toByteArray(Charsets.UTF_8)
                         connection.setFixedLengthStreamingMode(payload.size)
                         try {connection.outputStream.use {it.write(payload)}} finally {payload.fill(0)}
-                        if(connection.responseCode!=200) return@withContext null
+                        problem(connection.responseCode)?.let {throw Failure(it)}
                         val response=connection.inputStream.use {it.readNBytes(32_769)}
-                        if(response.size>32_768) null else result(response.toString(Charsets.UTF_8))
+                        try {
+                            val json=if(response.size>32_768) null else result(response.toString(Charsets.UTF_8))
+                            json ?: throw Failure(Problem.INVALID_REPLY)
+                        } finally {response.fill(0)}
                     } finally {connection.disconnect()}
-                } catch(_:java.io.IOException) {null}
+                } catch(_:java.net.SocketTimeoutException) {throw Failure(Problem.TIMEOUT)}
+                catch(_:java.io.IOException) {throw Failure(Problem.CONNECTION)}
             }
         }
     }

@@ -7,4 +7,7 @@
     <string name="live_voice_connecting">Connecting</string>
     <string name="live_voice_listening">Listening</string>
     <string name="live_voice_speaking">Speaking</string>
+    <string name="live_voice_speaker">Speakerphone</string>
+    <string name="live_voice_speaker_on">Phone speaker selected</string>
+    <string name="live_voice_speaker_auto">Default call audio route</string>
 </resources>

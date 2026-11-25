@@ -46,6 +46,15 @@ class LiveTurnExtractionTest {
         assertNull(extractor.inspect(old,reply,"run tests",false).draft)
     }
 
+    @Test fun extractionFailureCannotCountAsReadyAndRetainsTypedReason()=runBlocking {
+        val fail=LiveExtractionClient.Problem.AUTH
+        val extractor=LiveTurnExtraction { _,_->throw LiveExtractionClient.Failure(fail) }
+        val report=extractor.inspect("ready","ready","",false)
+        assertEquals(LiveTurnExtraction.Kind.UNKNOWN,report.kind)
+        assertEquals(fail,report.problem)
+        assertNull(report.draft)
+    }
+
     @Test fun unreadableResponseDoesNotBecomeAResult()=runBlocking {
         val extractor=LiveTurnExtraction { _,_-> null }
         assertEquals(LiveTurnExtraction.Kind.UNKNOWN,extractor.inspect("before","after","prompt",true).kind)
