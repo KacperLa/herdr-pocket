@@ -347,7 +347,7 @@ class TuiAgentsTest {
         val originals=roster("$first,$second")
         assertEquals(listOf("Codex 1","reviewer 2"),originals.map {it.name})
         assertEquals(originals.map {it.name},originals.map {it.spacesName})
-        assertEquals("Review",roster(first.replace(""1"",""Review"")+",$second").first().name)
+        assertEquals("Review",roster(first.replace(":\"1\"",":\"Review\"")+",$second").first().name)
         assertEquals("1",roster(first.dropLast(1)+""","custom_label":true}"""+",$second").first().name)
         assertEquals("Codex 1",roster("").first().name)
     }
