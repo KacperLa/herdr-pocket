@@ -1,11 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="dictation_settings_title">Dictation</string>
-    <string name="dictation_provider_android">Android on-device</string>
-    <string name="dictation_provider_parakeetype">Parakeetype</string>
-    <string name="dictation_provider_android_missing">Android didn’t report an on-device speech recognizer. Choose Parakeetype in Pocket’s Settings or use your keyboard’s voice typing. Pocket doesn’t use cloud dictation.</string>
-    <string name="dictation_provider_parakeetype_missing">Install Parakeetype 0.6.0 or newer in the same Android profile as Pocket, then import a model in Parakeetype.</string>
-    <string name="dictation_provider_parakeetype_update">Update Parakeetype to 0.6.0 or newer for recorded-audio dictation.</string>
-    <string name="dictation_provider_parakeetype_ineligible">Pocket couldn’t verify the offline Parakeetype service. Use an official Parakeetype build without internet permission.</string>
-    <string name="dictation_provider_parakeetype_detail">Pocket passes your recording to Parakeetype for local transcription. Import a model in Parakeetype first.</string>
+    <string name="dictation_android_speech_missing">No Android speech recognition service is available. Install a service and select it in Android’s Speech Services settings, or use your keyboard’s voice typing.</string>
 </resources>
