@@ -17,11 +17,11 @@ static void expect(const char *description, const char *want, size_t count) {
   puts("");
   length=0;
 }
-static void dictated_line(VTerm *vt) {
+static void dictated_line(VTerm *vt, int press_enter) {
   const unsigned chars[]={'c','a','f',0xe9,' ',0x1f600};
   for(size_t i=0;i<sizeof(chars)/sizeof(chars[0]);i++)
     vterm_keyboard_unichar(vt,chars[i],VTERM_MOD_NONE);
-  vterm_keyboard_key(vt,VTERM_KEY_ENTER,VTERM_MOD_NONE);
+  if(press_enter) vterm_keyboard_key(vt,VTERM_KEY_ENTER,VTERM_MOD_NONE);
 }
 static void pasted_text(VTerm *vt) {
   // Match the pinned JNI Terminal::paste: native mode markers around unmodified UTF-8.
@@ -31,13 +31,12 @@ static void pasted_text(VTerm *vt) {
   vterm_keyboard_end_paste(vt);
 }
 int main(int argc, char **argv) {
-  (void)argv;
   VTerm *vt=vterm_new(24,80);
   vterm_set_utf8(vt,1);
   vterm_state_reset(vterm_obtain_state(vt),1);
   vterm_output_set_callback(vt,collect,NULL);
   if(argc>1) {
-    dictated_line(vt);
+    dictated_line(vt,strcmp(argv[1],"--dictation-text") != 0);
     fwrite(output,1,length,stdout);
     vterm_free(vt);
     return 0;
@@ -55,13 +54,15 @@ int main(int argc, char **argv) {
   expect("next unmodified Up","\033[A",3);
   vterm_keyboard_key(vt,VTERM_KEY_ENTER,VTERM_MOD_NONE);
   expect("D-pad Enter in default mode","\r",1);
-  dictated_line(vt);
+  dictated_line(vt,1);
   expect("dictation text then default native Enter","caf\xc3\xa9 \xf0\x9f\x98\x80\r",11);
   vterm_input_write(vt,"\033[20h",5);
   vterm_keyboard_key(vt,VTERM_KEY_ENTER,VTERM_MOD_NONE);
   expect("D-pad Enter in newline mode","\r\n",2);
-  dictated_line(vt);
+  dictated_line(vt,1);
   expect("dictation text then native newline-mode Enter","caf\xc3\xa9 \xf0\x9f\x98\x80\r\n",12);
+  dictated_line(vt,0);
+  expect("dictation text without Enter even in newline mode","caf\xc3\xa9 \xf0\x9f\x98\x80",10);
   pasted_text(vt);
   expect("paste without bracketed mode or added Enter","caf\xc3\xa9 \xf0\x9f\x98\x80\nsecond",17);
   vterm_input_write(vt,"\033[?2004h",8);

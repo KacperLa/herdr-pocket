@@ -11,6 +11,7 @@ TUI_BUSY_SUFFIX = """exec "$herdr_bin" --session 'office' terminal attach 'term_
 TUI_FAST_SUFFIX = """exec "$herdr_bin" --session 'office' terminal attach 'term_fast'"""
 TUI_GET_EXISTING = """exec "$herdr_bin" --session 'office' pane get 'w1:p1'"""
 TUI_RENAME = """exec "$herdr_bin" --session 'office' pane rename 'w1:p1' 'Jetson AI 2'"""
+TUI_RENAME_TAB = """exec "$herdr_bin" --session 'office' tab rename 'w1:t1' 'Review tab'"""
 TUI_CREATE_TAB = """exec "$herdr_bin" --session 'office' tab create --workspace 'w1' --no-focus"""
 TUI_GET_NEW = """exec "$herdr_bin" --session 'office' pane get 'w1:p2'"""
 CORE_CREATE_SHELL = """exec "$hc_bin" run --bg --json --no-parent --name 'shell-fixture'"""
@@ -78,6 +79,7 @@ FILES_ROOT = pathlib.Path('virtual-files').resolve()
 FILES_READY = threading.Event()
 FILES_PTY = threading.Event()
 DELETION_REQUESTS = []
+RMDIR_REQUESTS = []
 MKDIR_REQUESTS = []
 
 class SlowFixtureFile(paramiko.SFTPHandle):
@@ -173,8 +175,13 @@ class FixtureSftp(paramiko.SFTPServerInterface):
         assert self.local(path).name.startswith(".herdr-pocket-upload-") and attr.st_mode & 0o777==0o700
         return self.change(lambda: self.local(path).chmod(attr.st_mode))
     def rmdir(self,path):
-        assert self.local(path).name.startswith(".herdr-pocket-upload-")
-        return self.change(lambda: self.local(path).rmdir())
+        target=self.local(path)
+        if not target.name.startswith(".herdr-pocket-upload-"):
+            RMDIR_REQUESTS.append(target.name)
+            assert target.name in ("empty [1]*?","rmdir-race"), path
+            if target.name=="rmdir-race":
+                (target/".added").write_text("keep me")
+        return self.change(target.rmdir)
     def remove(self,path):
         target=self.local(path)
         if target.parent.name.startswith(".herdr-pocket-upload-"):
@@ -253,6 +260,8 @@ def exercise_same_transport(t, s, connection):
     for command,result in [
         (TUI_GET_EXISTING, {'type':'pane_info','pane':existing}),
         (TUI_RENAME, {'type':'pane_info','pane':dict(existing,label='Jetson AI 2')}),
+        (TUI_GET_EXISTING, {'type':'pane_info','pane':existing}),
+        (TUI_RENAME_TAB, {'type':'tab_info','tab':{'workspace_id':'w1','tab_id':'w1:t1','label':'Review tab'}}),
         (TUI_CREATE_TAB, {'type':'tab_created','tab':{'workspace_id':'w1','tab_id':'w1:t2'},'root_pane':fresh}),
         (TUI_GET_NEW, {'type':'pane_info','pane':fresh}),
     ]:
@@ -360,6 +369,10 @@ def exercise_same_transport(t, s, connection):
     assert MKDIR_REQUESTS==['new [1]*? \\ folder','mkdir-race']
     assert (dest/'keep-folder'/'new [1]*? \\ folder').is_dir()
     assert (dest/'mkdir-race').read_bytes()==b'competitor data'
+    assert RMDIR_REQUESTS==['empty [1]*?','rmdir-race']
+    assert not (dest/'empty [1]*?').exists() and (dest/'empty [1]neighbor').is_dir()
+    assert (dest/'keep-folder'/'.hidden').is_file() and (dest/'folder-link').is_symlink()
+    assert (dest/'rmdir-race'/'.added').read_text()=='keep me'
     assert DELETION_REQUESTS==['delete [1]*?.bin','ambiguous-delete.bin']
     assert not (dest/'delete [1]*?.bin').exists() and not (dest/'ambiguous-delete.bin').exists()
     assert (dest/'delete [1]abcX.bin').read_bytes()==b'neighbor'
@@ -375,7 +388,7 @@ with socket.socket(socket.AF_INET) as listener:
     listener.settimeout(25)
     pathlib.Path('fixture-info').write_text(f'{listener.getsockname()[1]}\n{pin}\n')
     events = []
-    for index in range(11):
+    for index in (0, 1, -1, *range(2, 12)):
         connection, _ = listener.accept()
         s = Server()
         t = paramiko.Transport(connection)
@@ -394,6 +407,11 @@ with socket.socket(socket.AF_INET) as listener:
             (shell_path / 'delete [1]abcX.bin').write_bytes(b'neighbor')
             (shell_path / 'ambiguous-delete.bin').write_bytes(b'closed after unlink')
             (shell_path / 'keep-folder').mkdir()
+            (shell_path / 'keep-folder' / '.hidden').write_text('keep hidden')
+            (shell_path / 'empty [1]*?').mkdir()
+            (shell_path / 'empty [1]neighbor').mkdir()
+            (shell_path / 'rmdir-race').mkdir()
+            (shell_path / 'folder-link').symlink_to('keep-folder', target_is_directory=True)
             (FILES_ROOT / 'alpha' / 'a*?.txt').write_text('agent text ✓', encoding='utf-8')
             (FILES_ROOT / 'beta' / 'other.txt').write_text('other agent', encoding='utf-8')
             (FILES_ROOT / 'alpha' / 'other-link').symlink_to('../beta/other.txt')
@@ -409,6 +427,30 @@ with socket.socket(socket.AF_INET) as listener:
                 assert resumed.recv(100) == b'exit resumed'
                 resumed.send_exit_status(0)
                 resumed.close()
+                continue
+            if index == 11:
+                # No PTY command until explicitly requested by the client.
+                listing = expect_channel(t, s, LIST_SUFFIX)
+                listing.sendall(b'{"terminals":[{"address":"box/t4","name":"fixture","state":"live","agent":"bash"}],"hidden_finished":0}')
+                listing.send_exit_status(0)
+                listing.close()
+                first = expect_channel(t, s, SECOND_SUFFIX)
+                first.sendall(b'first pane on existing transport')
+                assert first.recv(100) == b'exit first'
+                first.send_exit_status(0)
+                first.close()
+                updated = expect_channel(t, s, LIST_SUFFIX)
+                updated.sendall(b'{"terminals":[{"address":"box/t3","name":"next","state":"live","agent":"bash"}],"hidden_finished":0}')
+                updated.send_exit_status(0)
+                updated.close()
+                second = expect_channel(t, s, ATTACH_SUFFIX)
+                second.sendall(b'second pane after exit')
+                assert second.recv(100) == b'close second without status'
+                second.close()
+                deadline = time.monotonic() + 5
+                while t.is_active() and time.monotonic() < deadline:
+                    time.sleep(.05)
+                assert not t.is_active()
                 continue
             ch = t.accept(6)
             if ch is not None:
@@ -453,7 +495,10 @@ with socket.socket(socket.AF_INET) as listener:
             pass
         finally:
             t.close()
-            events.append(s.events)
+            if index == -1:
+                assert s.events == [], "review must not send any SSH authentication or commands"
+            else:
+                events.append(s.events)
     pathlib.Path('fixture-events').write_text(json.dumps(events))
     assert events[0] == [] and events[1] == []
     for e in events[2:5]:
@@ -475,9 +520,13 @@ with socket.socket(socket.AF_INET) as listener:
         ['none', 'fixture'], ['publickey', 'fixture'], ['publickey', 'fixture']
     ]
     commands = [entry for entry in events[9] if entry[0] == 'exec']
-    wanted = [ATTACH_SUFFIX, LIST_SUFFIX, FAIL_SUFFIX, CORE_CREATE_SHELL, LIST_SUFFIX, TUI_LIST_SUFFIX, TUI_BUSY_SUFFIX, TUI_GET_EXISTING, TUI_RENAME, TUI_CREATE_TAB, TUI_GET_NEW,
+    wanted = [ATTACH_SUFFIX, LIST_SUFFIX, FAIL_SUFFIX, CORE_CREATE_SHELL, LIST_SUFFIX, TUI_LIST_SUFFIX, TUI_BUSY_SUFFIX, TUI_GET_EXISTING, TUI_RENAME, TUI_GET_EXISTING, TUI_RENAME_TAB, TUI_CREATE_TAB, TUI_GET_NEW,
               LIST_SUFFIX, SECOND_SUFFIX, TUI_FAST_SUFFIX, TUI_LIST_SUFFIX]
     assert len(commands) == len(wanted)
     for entry, suffix in zip(commands, wanted):
         assert_resolved_command([entry], suffix)
     assert len([entry for entry in events[9] if entry[0] == 'pty']) == 5
+    assert [entry for entry in events[11] if entry[0] in ('none', 'publickey', 'password')] == [
+        ['none', 'fixture'], ['publickey', 'fixture'], ['publickey', 'fixture']
+    ]
+    assert len([entry for entry in events[11] if entry[0] == 'pty']) == 2

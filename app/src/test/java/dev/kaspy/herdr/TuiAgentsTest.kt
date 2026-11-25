@@ -13,8 +13,8 @@ class TuiAgentsTest {
           {"terminal_id":"term_def","launch_pending":true}
         ]}}"""
         assertEquals(
-            listOf(CoreSession("term_abc","reviewer","live","Codex","working",tuiAgentName="reviewer"),
-                CoreSession("term_bcd","Unnamed agent","live","","unknown",description="second",isAgent=true)),
+            listOf(CoreSession("term_abc","reviewer","live","Codex","working",spacesName="reviewer",tuiAgentName="reviewer"),
+                CoreSession("term_bcd","Agent","live","","unknown",description="second",isAgent=true,spacesName="Agent")),
             TuiAgents.parse(json),
         )
         assertTrue(TuiAgents.parse("""{"result":{"type":"agent_list","agents":[]}}""").isEmpty())
@@ -31,8 +31,8 @@ class TuiAgentsTest {
           {"terminal_id":"term_g","name":"","terminal_title":"\u001b\n"},
           {"terminal_id":"term_h","display_agent":"An integration label but not a name"}
         ]}}""")
-        assertEquals(listOf("release reviewer","Codex agent","Codex agent","Claude Code agent",
-            "Pi agent","Codex agent","Unnamed agent","Unnamed agent"), result.map { it.name })
+        assertEquals(listOf("release reviewer","Codex","Codex","Claude Code",
+            "Pi","Codex","Agent","Agent"), result.map { it.name })
         assertEquals(listOf("Check the candidate","Untangle startup","Fix the camera","Fix offline tests",
             "Plan","Refactor planner",null,"An integration label but not a name"),result.map {it.description})
         assertEquals(('a'..'h').map { "term_$it" }, result.map { it.address })
@@ -176,7 +176,7 @@ class TuiAgentsTest {
             run(TuiAgents.listCommand("coding.dev"),fixture="legacy").let { (data,calls) ->
                 assertEquals(listOf("api snapshot","agent list","pane list","tab list","workspace list")
                     .map {"--session coding.dev $it"},calls)
-                assertEquals("Jetson AI",TuiAgents.parse(data).single().name)
+                assertEquals("Codex 1",TuiAgents.parse(data).single().name)
             }
             assertEquals(listOf("--session coding.dev terminal attach term_abc"),
                 run(TuiAgents.attachCommand("term_abc","coding.dev")).second)
@@ -221,11 +221,11 @@ class TuiAgentsTest {
           ]
         }}}"""
         val roster=TuiAgents.parse(payload)
-        assertEquals(listOf("explicit_name","Research agent","Release console","Jetson AI","Codex agent","8","Codex agent"),
+        assertEquals(listOf("Release console","Release console","Release console","Codex 1","Codex 1","8","Codex 1"),
             roster.filter {it.isAgent}.map {it.name})
         assertEquals("explicit_name",roster.first().tuiAgentName)
         assertNull(roster[1].tuiAgentName)
-        assertTrue(roster.first().spacesName.orEmpty().contains("Pane alias"))
+        assertEquals("Release console",roster.first().spacesName)
         assertEquals("stale_terminal",roster.single {!it.isAgent}.address)
         assertEquals("Long task",roster[1].description)
         assertEquals("Codex · /home/example/src",TuiAgents.runnerAndPath(roster[3]))
@@ -233,7 +233,8 @@ class TuiAgentsTest {
         assertEquals("/home/example/src",TuiAgents.runnerAndPath(roster[3].copy(agent="")))
         assertNull(TuiAgents.runnerAndPath(roster[2].copy(agent="")))
         assertEquals("term_3",roster[3].address)
-        assertEquals("Jetson AI 2",TuiAgents.nameForTerminal(TuiAgents.parse(payload.replace("Jetson AI","Jetson AI 2")),"term_3"))
+        assertEquals("New host tab",TuiAgents.nameForTerminal(
+            TuiAgents.parse(payload.replace("Release console","New host tab")),"term_1"))
     }
 
     @Test fun standaloneTerminalsRemainSelectableAndMoveToAgentsByExactIdentityOnRefresh() {
@@ -251,7 +252,7 @@ class TuiAgentsTest {
         assertEquals(AgentSelection.RESUME_CURRENT,agentSelection(beforeShells.first(),original,"term_shell",id,id))
         val current=TuiAgents.parse(snapshot(agent))
         val (agents,shells)=groupedLiveRoster(current)
-        assertEquals(listOf("now-coding"),agents.map {it.name})
+        assertEquals(listOf("now-coding 1"),agents.map {it.name})
         assertEquals(listOf("term_other"),shells.map {it.address})
         assertEquals(AgentSelection.RESUME_CURRENT,agentSelection(agents.single(),current,"term_shell",id,id))
     }
@@ -318,6 +319,56 @@ class TuiAgentsTest {
         assertEquals(listOf("a","b","c"),space.rows.map {it.address})
     }
 
+    @Test fun hostTabNameLabelsAnUnnamedAgentWithoutOverwritingRegisteredAgentName() {
+        fun agent(tab:String, name:String="")=TuiAgents.parse("""{"result":{"type":"session_snapshot","snapshot":{
+          "workspaces":[{"workspace_id":"w","label":"Projects","custom_label":false}],
+          "tabs":[{"workspace_id":"w","tab_id":"t9","label":"$tab"}],
+          "panes":[{"workspace_id":"w","tab_id":"t9","pane_id":"p","terminal_id":"agent"}],
+          "agents":[{"workspace_id":"w","tab_id":"t9","pane_id":"p","terminal_id":"agent","agent":"codex"$name}]
+        }}}""").single()
+        assertEquals("Review changes",agent("Review changes").name)
+        val named=agent("Review changes",""", "name":"reviewer"""")
+        assertEquals("Review changes",named.name)
+        assertEquals("reviewer",named.tuiAgentName)
+        assertEquals("Review changes",named.rosterPlacement?.tabLabel)
+    }
+
+    @Test fun agentTitlesUseCustomTabOrRunnerAndActualTabPosition() {
+        fun roster(tabs:String)=TuiAgents.parse("""{"result":{"type":"session_snapshot","snapshot":{
+          "workspaces":[{"workspace_id":"w","label":"Ignore this workspace"}],
+          "tabs":[$tabs],
+          "panes":[{"workspace_id":"w","tab_id":"t9","pane_id":"p1","terminal_id":"one","label":"Ignore this pane"},
+                   {"workspace_id":"w","tab_id":"t3","pane_id":"p2","terminal_id":"two"}],
+          "agents":[{"workspace_id":"w","tab_id":"t9","pane_id":"p1","terminal_id":"one","agent":"codex"},
+                    {"workspace_id":"w","tab_id":"t3","pane_id":"p2","terminal_id":"two","agent":"claude","name":"reviewer"}]
+        }}}""")
+        val first="""{"workspace_id":"w","tab_id":"t9","number":9,"label":"1"}"""
+        val second="""{"workspace_id":"w","tab_id":"t3","number":3,"label":"2"}"""
+        val originals=roster("$first,$second")
+        assertEquals(listOf("Codex 1","reviewer 2"),originals.map {it.name})
+        assertEquals(originals.map {it.name},originals.map {it.spacesName})
+        assertEquals("Review",roster(first.replace(":\"1\"",":\"Review\"")+",$second").first().name)
+        assertEquals("1",roster(first.dropLast(1)+""","custom_label":true}"""+",$second").first().name)
+        assertEquals("Codex 1",roster("").first().name)
+    }
+
+    @Test fun unnamedFirstTabKeepsTheSameSpacesLabelWhenAnotherTabIsAdded() {
+        fun label(withSecondTab:Boolean, firstLabel:String=""):String? {
+            val first="""{"workspace_id":"w","tab_id":"t9"$firstLabel}"""
+            val tabs=if(withSecondTab) """$first,{"workspace_id":"w","tab_id":"t2"}""" else first
+            val payload="""{"result":{"type":"session_snapshot","snapshot":{
+              "workspaces":[{"workspace_id":"w","label":"Projects"}],
+              "tabs":[$tabs],
+              "panes":[{"workspace_id":"w","tab_id":"t9","pane_id":"p","terminal_id":"shell"}],
+              "agents":[]
+            }}}"""
+            return spacesRoster(TuiAgents.parse(payload)).single().rows.single().spacesName
+        }
+        assertEquals("Terminal · 1",label(false))
+        assertEquals(label(false),label(true))
+        assertEquals("Dev shell",label(false,""", "label":"Dev shell","custom_label":true"""))
+    }
+
     @Test fun goToLabelsFollowNamedTabsAndSplitPositionsWithoutChangingAgentIdentity() {
         val payload="""{"result":{"type":"session_snapshot","snapshot":{
           "workspaces":[{"workspace_id":"w8","label":"Projects","branch":"feature/test"}],
@@ -339,10 +390,10 @@ class TuiAgentsTest {
         }}}"""
         val roster=TuiAgents.parse(payload)
         val space=spacesRoster(roster).single()
-        assertEquals(listOf("Release · Manual shell · 1","Release · review · 2","Dev tasks","Terminal · 3"),
+        assertEquals(listOf("Release · Manual shell · 1","Release","Claude Code 2","Terminal · 3"),
             space.rows.map {it.spacesName})
         assertEquals("/repos/release",space.rows.first().spacesPath)
-        assertEquals("review",priorityAgentRoster(roster).first().name)
+        assertEquals("Release",priorityAgentRoster(roster).first().name)
         assertSame(priorityAgentRoster(roster).first(),space.rows[1])
         assertEquals("Release",space.rows[1].rosterPlacement?.tabLabel)
         assertEquals(2,space.rows[1].rosterPlacement?.paneOrdinal)

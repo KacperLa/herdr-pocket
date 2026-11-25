@@ -32,7 +32,7 @@ A readable native connection form, strict SSH SHA-256 host pinning, local privat
 The list includes shells because Core does not expose a separate agent registry. Status is a manual snapshot, not a subscription. The list command may auto-start Core's background server if absent, but does not start an agent.
 
 ## Security and lifecycle
-Only public-key authentication. An unfamiliar host is probed without authentication. The app shows the exact host, port and SHA-256 fingerprint with a warning that the offered identity is not independently verified. Compare it through a trusted route if possible, then explicitly tap Trust on first use to save it. Saved fingerprints are scoped to normalized host and port. Changing either does not replace another saved pin. A known mismatch is always rejected before authentication and cannot be accepted in the first-use dialog. A valid prior fingerprint is migrated only to the saved endpoint; there is no automatic acceptance or overwrite.
+Only public-key authentication. An unfamiliar host is probed without authentication. The app shows the exact host, port and SHA-256 fingerprint with a warning that the offered identity is not independently verified. Compare it through a trusted route if possible, then explicitly tap Trust on first use to save it. Saved fingerprints are scoped to normalized host and port. Changing either does not replace another saved pin. A known mismatch is always rejected before authentication and cannot be accepted in the first-use dialog. Use **Review changed host key** after a mismatch (or **Check host fingerprint** under Host verification). The no-authentication check shows both fingerprints. Verify the new one through a trusted route before selecting **Replace saved fingerprint**, then reconnect manually. Cancel keeps the old pin, and a passphrase saved for the old pin is not reused. A valid prior fingerprint is migrated only to the saved endpoint; there is no automatic acceptance or overwrite.
 
 The app remembers a read-only Android document grant, not a copy of the SSH key. If Android revokes access or the file goes away, select it again. To save a typed key passphrase, explicitly check Remember the passphrase I enter. The app saves it only after authentication, using AES-GCM with a nonexportable Android Keystore key. The ciphertext binds to the host, port, username, pinned fingerprint, Android file identity and the file's SHA-256. It is never used for an unknown or different profile. Forget key and changing the selected file clear the saved passphrase; Forget saved passphrase leaves the key selected. Credentials are excluded from backups, activity state and logs. Android may still hold the typed text in process memory; byte arrays are wiped where practical. No telemetry.
 
@@ -91,3 +91,38 @@ Cold startup attempts one bounded reconnect to the last live Core agent when the
 If a visible remote terminal disconnects, its last screen stays dimmed and read-only. An automatic retry shows centered **Reconnecting…**; a failed attempt offers centered **Reconnect** only when the same configured profile and pinned SSH host are eligible. **Connection settings** remain reachable for passphrase/key errors or a changed host key. Initial connection errors still appear in Connection settings. Retry limits and saved-target rules are unchanged; absent agents return to the picker. A custom retry reruns only the previously chosen command. The terminal no longer displays its dimensions line; pinch still resizes the live terminal.
 
 A single-finger tap or an unmodified primary Bluetooth mouse click sends a left click to a live terminal application only while it has negotiated SGR cell-based mouse reports. Gestures and text selection keep their existing behavior. In ordinary terminal apps without mouse tracking, a tap still opens the keyboard; the keyboard dock button remains available in mouse-aware apps.
+
+## Live Voice preview (experimental branch)
+
+On the Live Voice branch, open **Settings → Live Voice preview** and choose a
+trusted service:
+
+- **GPT Live compatible:** enter your proxy's HTTPS/WSS URL and client API key.
+  Pocket speaks the GPT Live primary WebSocket protocol, not the Realtime
+  protocol. Leave an OpenAI project key on the proxy, not in Pocket.
+- **FOSS-Live:** enter its HTTPS/WSS URL and project bearer key. Pocket uses
+  `local-live` and lets the server choose the voice. A base URL gets
+  `/v1/live/sessions` appended; a complete custom path is used as supplied.
+- **One-time relay ticket:** use the existing [private relay](tools/live-relay)
+  and paste a fresh ticket at call start.
+
+Also configure the full HTTPS **Extraction URL** (e.g.
+`https://models.example/v1/chat/completions`), a chat model that supports
+structured JSON responses, and its bearer key if needed. The extraction and
+voice services can be on the same trusted host, but they use different APIs
+and credentials. Saved credentials are encrypted with Android Keystore and
+bound to the configured endpoint. Editing a URL does not move its saved key
+to the new endpoint.
+
+Open a recognized Herdr TUI agent and tap the waveform. The start dialog shows
+which service receives microphone audio and which receives visible terminal
+snapshots. A single outstanding delegation can be reviewed and then submitted
+through Herdr. Pocket detects whether the settled screen is a question or
+completion, then makes a separate structured extraction request. Question
+and choice text must appear in the terminal; a completion requires a fresh
+verbatim evidence quote and a real Herdr work cycle. Pocket shows a local,
+editable speech draft and rechecks the selected pane and screen before
+sending it to the Live service. It does not answer a question, approve a
+request, or retry uncertain agent input automatically. If the response is
+ambiguous, stale, or truncated, check the terminal instead. Leaving the pane
+closes voice, but does not cancel agent work already submitted.

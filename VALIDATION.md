@@ -209,3 +209,7 @@ Replay starts after recognizer readiness or a short fallback delay and feeds PCM
 ## Dictation feedback dock (0.69)
 
 The quick actions and direction popover hide during capture and processing. A right-to-left recording waveform shows 40 ms RMS windows of actual PCM (drawn as muted white rounded bars). Cancel discards the take; stop uses the existing transcribe-and-send action. Stop, recognition, retry and terminal-submit phases show “Transcribing audio…” in place of the waveform. Tests cover silence/clipping, ordered bounded history and phase routing. No handset rendering or microphone recognition test.
+
+### 0.85: changed SSH host identity
+
+Host trust tests cover leaving the saved key intact until confirmation, stale offers, failed writes, and host/port isolation. The disposable SSH fixture rejects a mismatched pin, observes no authentication or command during explicit review, and authenticates only on a separate connection after explicit replacement. Release build, app and terminal unit tests, and release lint passed; the dialog was not exercised on a handset.

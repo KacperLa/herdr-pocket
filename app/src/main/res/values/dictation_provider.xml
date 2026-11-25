@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="dictation_android_speech_missing">No Android speech recognition service is available. Install a service and select it in Android’s Speech Services settings, or use your keyboard’s voice typing.</string>
+</resources>

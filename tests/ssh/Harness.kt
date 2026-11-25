@@ -15,7 +15,20 @@ fun main() {
         val wrong = sshSha256Fingerprint(byteArrayOf(1,2,3))
         checkNotNull(ssh.connect(base.copy(expectedPin=wrong), File("local-client").readBytes(), passphrase(), cmd))
         check(event() == SshSession.Event.RejectedHostKey(pin, wrong))
-        checkNotNull(ssh.connect(base.copy(expectedPin=pin), File("local-client").readBytes(), passphrase(), cmd, pty=false))
+        val endpoint=HostEndpoint.parse(base.host,port)!!
+        val savedPins=mutableMapOf(endpoint to wrong)
+        val trust=HostTrust(savedPins::get) { host, fingerprint ->
+            savedPins[host]=fingerprint
+            true
+        }
+        // Explicit review opens a separate unauthenticated probe, never a fallback login.
+        checkNotNull(ssh.connect(base, byteArrayOf(), null, "true"))
+        val review=event() as SshSession.Event.RejectedHostKey
+        check(review.expected==null && review.actual==pin)
+        val offer=checkNotNull(trust.replacementOffer(endpoint,review.actual,1))
+        check(trust.pin(endpoint)==wrong)
+        check(trust.accept(offer,endpoint,1))
+        checkNotNull(ssh.connect(base.copy(expectedPin=trust.pin(endpoint)), File("local-client").readBytes(), passphrase(), cmd, pty=false))
         val listing = StringBuilder()
         val diagnostics = StringBuilder()
         while (true) {
@@ -153,7 +166,7 @@ fun main() {
         check(coreShell.address=="t9" && !coreShell.isAgent)
         val (tuiAgents,tuiShells)=groupedLiveRoster(TuiAgents.parse(rpc(TuiAgents.listCommand("office"))))
         val tuiAgent=tuiAgents.single()
-        check(tuiAgent.name=="Jetson AI" && tuiAgent.address=="term_busy")
+        check(tuiAgent.name=="Codex 1" && tuiAgent.address=="term_busy")
         check(tuiShells.single().address=="term_shell")
         val tuiBusyId=checkNotNull(ssh.switchPty(AgentBackend.TUI.switchCommand(tuiAgent.address,"office"),tui=true))
         val tuiBusy=event() as SshSession.Event.OperationFailed
@@ -165,7 +178,11 @@ fun main() {
         val existing=checkNotNull(tuiAgent.tuiLocation)
         check(TuiMutations.confirmsPane(rpc(TuiMutations.inspectPane(existing,"office")),existing))
         check(TuiMutations.confirmsPane(rpc(TuiMutations.renamePane(existing,"Jetson AI 2","office")),existing,"Jetson AI 2"))
-        val fresh=checkNotNull(TuiMutations.newPane(rpc(TuiMutations.createShellTab(existing.workspaceId,"office")),existing.workspaceId))
+        val tabTarget=TuiMutations.RenameTarget.TAB
+        check(TuiMutations.confirmsTarget(rpc(TuiMutations.inspectTarget(existing,tabTarget,"office")),existing,tabTarget))
+        check(TuiMutations.confirmsTarget(
+            rpc(TuiMutations.renameTarget(existing,tabTarget,"Review tab","office")),existing,tabTarget,"Review tab"))
+        val fresh=checkNotNull(TuiMutations.newShellPane(rpc(TuiMutations.createShellTab(existing.workspaceId,"office")),existing.workspaceId))
         check(fresh.terminalId!=existing.terminalId && fresh.paneId!=existing.paneId)
         check(TuiMutations.confirmsPane(rpc(TuiMutations.inspectPane(fresh,"office")),fresh))
         val freshShell=TuiAgents.plainTerminal(fresh)
@@ -239,7 +256,7 @@ fun main() {
         check(ssh.sendToTerminal(tuiTerminal,"still at shell".toByteArray()))
         expectText("shell active while browsing")
         val shellFolder=sftpResult() as SftpRead.Folder
-        check(shellFolder.root==shellRoot.path && shellFolder.entries.map { it.name }==listOf("keep-folder","ambiguous-delete.bin","capture.bin","delete [1]*?.bin","delete [1]abcX.bin","escape-link","full-source.txt","inside.txt","slow.bin"))
+        check(shellFolder.root==shellRoot.path && shellFolder.entries.map { it.name }==listOf("empty [1]*?","empty [1]neighbor","keep-folder","rmdir-race","ambiguous-delete.bin","capture.bin","delete [1]*?.bin","delete [1]abcX.bin","escape-link","folder-link","full-source.txt","inside.txt","slow.bin"))
         check(ssh.terminalIdentity()===tuiTerminal)
         val downloads=LinkedBlockingQueue<SftpDownload>()
         val complete=File.createTempFile("outside-preview",".tmp",File("."))
@@ -334,8 +351,8 @@ fun main() {
         check(ssh.deleteFile(newTerminal,shellRoot.path,emptyList(),literalDelete) {_,_ ->
             error("Stale PTY cannot delete")
         }==null)
-        fun remove(name:String, identity:SftpFileIdentity?=null):SftpDelete {
-            checkNotNull(ssh.deleteFile(tuiTerminal,shellRoot.path,emptyList(),name,identity) {_,result ->
+        fun remove(name:String, identity:SftpFileIdentity?=null,directory:Boolean=false):SftpDelete {
+            checkNotNull(ssh.deleteFile(tuiTerminal,shellRoot.path,emptyList(),name,identity,directory) {_,result ->
                 deletions.add(result)
             })
             return checkNotNull(deletions.poll(10,TimeUnit.SECONDS))
@@ -344,11 +361,20 @@ fun main() {
         check(remove(literalDelete,captured)===SftpDelete.Success)
         check(remove("escape-link") is SftpDelete.Failure)
         check(remove("keep-folder") is SftpDelete.Failure)
+        fun removeDirectory(name:String):SftpDelete {
+            val entry=shellFolder.entries.single {it.name==name}
+            return remove(name,entry.identity,directory=true)
+        }
+        check(removeDirectory("empty [1]*?")===SftpDelete.Success)
+        check((removeDirectory("keep-folder") as SftpDelete.Failure).message.contains("Only empty folders"))
+        check(removeDirectory("folder-link") is SftpDelete.Failure)
+        check((removeDirectory("rmdir-race") as SftpDelete.Failure).message.contains("Could not confirm"))
+
         val stale=checkNotNull(shellFolder.entries.single {it.name=="delete [1]abcX.bin"}.identity)
         check((remove("delete [1]abcX.bin",stale.copy(size=stale.size+1)) as SftpDelete.Failure).message.contains("changed"))
         check((remove("ambiguous-delete.bin") as SftpDelete.Failure).message.contains("Could not confirm"))
         check(ssh.terminalIdentity()===tuiTerminal)
-        println("Delete verified: literal regular file only, stale metadata/link/directory refused, ambiguous outcome not retried.")
+        println("Delete verified: literal regular file only, literal empty directory only, nonempty and link refused, ambiguous outcome not retried.")
         val mkdirs=LinkedBlockingQueue<SftpMkdir>()
         val literalFolder="""new [1]*? \ folder"""
         check(ssh.createFolder(newTerminal,shellRoot.path,emptyList(),literalFolder) {_,_ ->
@@ -381,6 +407,40 @@ fun main() {
         awaitReady("resumed last target")
         check(ssh.send("exit resumed".toByteArray()))
         check(event() == SshSession.Event.Closed(0))
+        val idle = checkNotNull(ssh.connect(config, File("local-client").readBytes(), passphrase(), "unused",
+            pty = false, transportOnly = true))
+        check(event() == SshSession.Event.TransportReady)
+        check(ssh.hasIdleTransport() && ssh.terminalIdentity() == null)
+        check(!ssh.send("no pane yet".toByteArray()))
+        val roster = checkNotNull(ssh.listOnTransport(cmd))
+        val rosterReply = event() as SshSession.Event.OperationList
+        check(rosterReply.id == roster && rosterReply.exitStatus == 0 && ssh.isCurrent(idle))
+        check(CoreSessions.parse(rosterReply.stdout.toString(Charsets.UTF_8)).single().address == selected)
+        check(ssh.hasIdleTransport() && ssh.terminalIdentity() == null)
+        val first = checkNotNull(ssh.switchPty(AgentBackend.CORE.switchCommand(selected,null)))
+        check(event() == SshSession.Event.OperationSwitched(first))
+        check(ssh.isCurrent(idle) && !ssh.hasIdleTransport() && ssh.terminalIdentity() != null)
+        expectText("first pane on existing transport")
+        val firstIdentity=checkNotNull(ssh.terminalIdentity())
+        check(ssh.send("exit first".toByteArray()))
+        check(event() == SshSession.Event.TerminalEnded(firstIdentity,0))
+        check(ssh.isCurrent(idle) && ssh.hasIdleTransport() && ssh.terminalIdentity()==null)
+        check(!ssh.sendToTerminal(firstIdentity,"stale input".toByteArray()))
+        val afterClose=checkNotNull(ssh.listOnTransport(cmd))
+        val updated=event() as SshSession.Event.OperationList
+        check(updated.id==afterClose && updated.exitStatus==0)
+        check(CoreSessions.parse(updated.stdout.toString(Charsets.UTF_8)).single().address=="box/t3")
+        val afterSwitch=checkNotNull(ssh.switchPty(AgentBackend.CORE.switchCommand("box/t3",null)))
+        check(event() == SshSession.Event.OperationSwitched(afterSwitch))
+        check(ssh.isCurrent(idle) && ssh.terminalIdentity()!==firstIdentity)
+        expectText("second pane after exit")
+        val secondIdentity=checkNotNull(ssh.terminalIdentity())
+        check(ssh.send("close second without status".toByteArray()))
+        check(event() == SshSession.Event.TerminalEnded(secondIdentity,null))
+        check(ssh.hasIdleTransport())
+        ssh.disconnect()
+        check(!ssh.hasIdleTransport())
     }
+    println("Cold roster, both PTYs, and roster after close reused one pinned SSH connection.")
     println("Loopback SSH integration: unknown/wrong rejected, encrypted Ed25519 key, non-PTY listing/isolated stderr and output/timeout bounds, bidirectional PTY, resize, exit, abrupt transport loss versus channel close, same-transport switch and resize, TUI discovery/occupied-terminal refusal without takeover, negotiated SGR wheel/click and disable, and explicit reattach passed.")
 }

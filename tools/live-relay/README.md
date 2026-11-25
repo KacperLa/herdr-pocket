@@ -21,7 +21,7 @@ Use a trusted machine; it does **not** need to run Herdr or have SSH access to y
    }
    ```
 
-4. In Pocket, save `wss://voice.example.com/live` under **Settings → Live Voice preview**. Open the target agent and tap the waveform icon beside dictation. At the relay machine, with the same operator secret in the environment, run `python relay.py mint`. Paste the one-time ticket into Pocket within two minutes. The relay consumes it once; Pocket does not persist it. Each call needs a new ticket.
+4. In Pocket, choose **One-time relay ticket**, save `wss://voice.example.com/live` under **Settings → Live Voice preview**, and configure the extraction endpoint and model described in the [app README](../../README.md#live-voice-preview-experimental-branch). Open the target agent and tap the waveform icon beside dictation. At the relay machine, with the same operator secret in the environment, run `python relay.py mint`. Paste the one-time ticket into Pocket within two minutes. The relay consumes it once; Pocket does not persist it. Each call needs a new ticket.
 
 A live call sends microphone audio through the relay to OpenAI and may incur API charges. Hang up with the waveform icon. When the app loses the selected terminal or goes into the background, it shuts the call down. Closing voice does not stop agent work that was already sent.
 

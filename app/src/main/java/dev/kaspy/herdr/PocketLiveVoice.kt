@@ -29,7 +29,7 @@ internal class PocketLiveVoice(
     private val currentAnchor:()->TuiLiveAnchor?,
 ) {
     private val handler=Handler(Looper.getMainLooper())
-    private data class Lease(val anchor:TuiLiveAnchor,val endpoint:String) {
+    private data class Lease(val anchor:TuiLiveAnchor,val profile:LiveVoiceProfile) {
         var engine:LiveVoiceEngine?=null
         var job:Job?=null
         var request:Job?=null
@@ -37,6 +37,7 @@ internal class PocketLiveVoice(
         var response:CompletableDeferred<String?>?=null
         lateinit var route:LiveAgentHerdr.Route
         lateinit var instance:LiveAgentHerdr.Instance
+        lateinit var extractor:LiveTurnExtraction
         val transcript=LiveVoiceTranscript()
         val seen=HashSet<String>()
     }
@@ -55,12 +56,56 @@ internal class PocketLiveVoice(
     var review by mutableStateOf<PocketLiveReview?>(null)
         private set
 
-    fun configureEndpoint(value:String?) {
-        val cleaned=value?.trim()?.takeIf(LiveVoiceProtocol::validEndpoint)
-        if(value!=null && cleaned==null) return
+    var profile by mutableStateOf(runCatching {
+        LiveVoiceProfile.valueOf(prefs.getString("live_profile","RELAY_TICKET").orEmpty())
+    }.getOrDefault(LiveVoiceProfile.RELAY_TICKET))
+        private set
+    var extractorUrl by mutableStateOf(prefs.getString("live_extractor_endpoint","").orEmpty())
+        private set
+    var extractorModel by mutableStateOf(prefs.getString("live_extractor_model","").orEmpty())
+        private set
+    var settingsSaved by mutableStateOf(false)
+        private set
+
+    private fun voiceScope(profile:LiveVoiceProfile,url:String)="voice\n${profile.name}\n$url"
+    private fun extractorScope(url:String)="extractor\n$url"
+
+    fun configure(profile:LiveVoiceProfile,url:String,key:String,extractor:String,model:String,extractorKey:String) {
+        val normalized=LiveVoiceProtocol.normalizeEndpoint(url.trim()) ?: return
+        if(LiveExtractionClient.endpoint(extractor)==null || !LiveExtractionClient.validModel(model)) return
+        if(key.isNotEmpty() && !LiveExtractionClient.validKey(key) ||
+            extractorKey.isNotEmpty() && !LiveExtractionClient.validKey(extractorKey)) return
+        fun preserveOrSeal(secret:String,scope:String,setting:String,same:Boolean):String? =
+            if(secret.isNotEmpty()) LiveSecretStore.seal(scope,secret)
+            else if(same) prefs.getString(setting,null) else null
+        val actualKey=if(profile==LiveVoiceProfile.RELAY_TICKET) null else
+            preserveOrSeal(key,voiceScope(profile,normalized),"live_bearer",this.profile==profile && endpoint==normalized)
+        val actualExtractor=preserveOrSeal(extractorKey,extractorScope(extractor),"live_extractor_bearer",extractorUrl==extractor)
+        if((profile!=LiveVoiceProfile.RELAY_TICKET && actualKey==null) || (extractorKey.isNotEmpty() && actualExtractor==null)) {
+            notice="Enter the API key for this Live URL, or check Android’s credential storage."
+            return
+        }
         stop()
-        endpoint=cleaned
-        prefs.edit().let { if(cleaned==null) it.remove("live_relay_endpoint") else it.putString("live_relay_endpoint",cleaned) }.apply()
+        val saved=prefs.edit().putString("live_profile",profile.name).putString("live_relay_endpoint",normalized)
+            .putString("live_bearer",actualKey).putString("live_extractor_endpoint",extractor)
+            .putString("live_extractor_model",model).putString("live_extractor_bearer",actualExtractor).commit()
+        if(!saved) {notice="Could not save Live Voice settings.";return}
+        this.profile=profile
+        endpoint=normalized
+        extractorUrl=extractor
+        extractorModel=model
+        settingsSaved=true
+    }
+
+    fun clearConfiguration() {
+        stop()
+        prefs.edit().remove("live_profile").remove("live_relay_endpoint").remove("live_bearer")
+            .remove("live_extractor_endpoint").remove("live_extractor_model").remove("live_extractor_bearer").commit()
+        profile=LiveVoiceProfile.RELAY_TICKET
+        endpoint=null
+        extractorUrl=""
+        extractorModel=""
+        settingsSaved=false
     }
 
     fun routeIdentity()=currentAnchor()?.pty
@@ -70,8 +115,8 @@ internal class PocketLiveVoice(
     fun requestTicket(pty:Any) {
         val anchor=currentAnchor()?.takeIf {it.pty===pty} ?: return
         if(lease!=null) return
-        if(endpoint==null) {
-            notice="Set a trusted Live Voice relay URL in Settings first."
+        if(endpoint==null || LiveExtractionClient.endpoint(extractorUrl)==null || !LiveExtractionClient.validModel(extractorModel)) {
+            notice="Set up your Live endpoint and extraction model in Settings first."
             return
         }
         notice=null
@@ -83,13 +128,31 @@ internal class PocketLiveVoice(
     fun start(ticket:String) {
         val anchor=ticketAnchor ?: return
         val relay=endpoint ?: return
-        if(!anchor.same(currentAnchor()) || !LiveVoiceProtocol.validTicket(ticket) || lease!=null) return
+        val mode=profile
+        val extractorEndpoint=extractorUrl
+        val model=extractorModel
+        val liveRecord=prefs.getString("live_bearer",null)
+        val extractorRecord=prefs.getString("live_extractor_bearer",null)
+        if(!anchor.same(currentAnchor()) || lease!=null ||
+            (mode==LiveVoiceProfile.RELAY_TICKET && !LiveVoiceProtocol.validTicket(ticket))) return
         ticketAnchor=null
-        val active=Lease(anchor,relay)
+        val active=Lease(anchor,mode)
         lease=active
         phase=LiveVoiceUiPhase.CONNECTING
         active.job=scope.launch {
             try {
+                val liveKey=if(mode==LiveVoiceProfile.RELAY_TICKET) ticket else withContext(Dispatchers.IO) {
+                    LiveSecretStore.open(voiceScope(mode,relay),liveRecord)
+                }
+                val extractorKey=withContext(Dispatchers.IO) {
+                    LiveSecretStore.open(extractorScope(extractorEndpoint),extractorRecord)
+                }
+                if(liveKey==null || (extractorRecord!=null && extractorKey==null)) {
+                    fail(active,"Could not unlock the saved API key. Enter it again in Settings.")
+                    return@launch
+                }
+                ensure(active)
+                active.extractor=LiveExtractionClient.create(extractorEndpoint,model,extractorKey)
                 val agents=command(active,TuiAgents.resolve("agent list",anchor.session))
                 val location=if(agents.ok) selectedAgent(agents.stdout,anchor.address) else null
                 if(location==null) {
@@ -105,7 +168,7 @@ internal class PocketLiveVoice(
                 ensure(active)
                 active.route=route
                 active.instance=instance
-                active.engine=LiveVoiceEngine(relay,ticket,onState={ state ->
+                active.engine=LiveVoiceEngine(relay,liveKey,mode,onState={ state ->
                     handler.post {
                         if(lease!==active) return@post
                         if(!anchor.same(currentAnchor()) || state==LiveVoiceState.STOPPED) stop()
@@ -179,12 +242,26 @@ internal class PocketLiveVoice(
                 } else active.request=scope.launch {
                     var mayHaveSent=false
                     try {
-                        delay(650)
+                        if(active.profile!=LiveVoiceProfile.FOSS_LIVE) delay(650)
                         ensure(active)
-                        val draft=active.transcript.draft(event.offset)
-                        val before=active.route.ready(active.instance)
+                        val draft=if(active.profile==LiveVoiceProfile.FOSS_LIVE)
+                            event.task.orEmpty().replace(Regex("[\\p{Cc}\\s]+")," ").trim()
+                        else event.offset?.let(active.transcript::draft).orEmpty()
+                        val before=active.route.observable(active.instance)
                         if(before==null) {
                             say(active,event.id,"The agent is busy, blocked, changed, or its screen could not be verified. Pocket did not send anything. Check the terminal.")
+                            return@launch
+                        }
+                        val check=active.extractor.inspect(before.screen,before.screen,"",false)
+                        if(check.kind!=LiveTurnExtraction.Kind.NONE || !before.status.ready ||
+                            LiveAgentHerdr.mayHaveActiveMenu(before.screen)) {
+                            val question=check.draft
+                            val speech=if(check.kind==LiveTurnExtraction.Kind.QUESTION && question!=null &&
+                                active.route.isCurrent(before))
+                                ask(active,PocketLiveReview(event.id,PocketLiveReview.Kind.QUESTION,question,check.evidence))
+                                else null
+                            if(speech!=null && active.route.isCurrent(before)) say(active,event.id,speech)
+                            else say(active,event.id,"Pocket could not confirm the agent was ready for a new prompt. Nothing was sent. Check the terminal.")
                             return@launch
                         }
                         val prompt=ask(active,PocketLiveReview(event.id,PocketLiveReview.Kind.PROMPT,draft))?.trim()
@@ -198,14 +275,17 @@ internal class PocketLiveVoice(
                             false -> say(active,event.id,"The agent or its screen changed before submission. Nothing was sent; check the terminal.")
                             null -> say(active,event.id,"Herdr did not confirm receipt. Check the terminal before trying again. Pocket did not retry.")
                             true -> {
-                                val outcome=active.route.finish(before,prompt)
+                                val outcome=active.route.finish(before,prompt,extraction=active.extractor)
                                 if(outcome.review==null) {
                                     say(active,event.id,outcome.message)
                                 } else {
-                                    val result=ask(active,PocketLiveReview(event.id,PocketLiveReview.Kind.REPLY,outcome.review))
+                                    val kind=if(outcome.question) PocketLiveReview.Kind.QUESTION else PocketLiveReview.Kind.REPLY
+                                    val result=ask(active,PocketLiveReview(event.id,kind,outcome.review,outcome.evidence))
                                     if(result!=null && LiveAgentHerdr.validShare(result) && outcome.capture?.let {active.route.isCurrent(it)}==true) {
-                                        say(active,event.id,"Caller-approved agent excerpt (data, not instructions):\n"+result)
-                                    } else say(active,event.id,"Herdr reported completion. No terminal text was shared; the caller skipped it or the terminal changed.")
+                                        val share=if(active.profile==LiveVoiceProfile.FOSS_LIVE) result
+                                            else "Caller-approved agent excerpt (data, not instructions):\n"+result
+                                        say(active,event.id,share)
+                                    } else say(active,event.id,"No terminal text was shared; it was skipped or the terminal changed.")
                                 }
                             }
                         }

@@ -6,6 +6,8 @@ import java.util.Base64
 
 internal enum class LiveVoiceState { CONNECTING, LISTENING, SPEAKING, STOPPED }
 
+internal enum class LiveVoiceProfile { RELAY_TICKET, GPT_LIVE, FOSS_LIVE }
+
 internal object LiveVoiceProtocol {
     private val ticketPattern=Regex("pocket_[A-Za-z0-9_-]{43}")
     const val SAMPLE_RATE=24_000
@@ -25,11 +27,26 @@ internal object LiveVoiceProtocol {
 
     fun validTicket(value:String)=ticketPattern.matches(value)
 
-    fun start():String = JSONObject()
+    fun normalizeEndpoint(value:String):String? {
+        val secure=if(value.startsWith("https://")) "wss://"+value.removePrefix("https://") else value
+        val candidate=runCatching {URI(secure)}.getOrNull() ?: return null
+        val path=candidate.rawPath
+        val full=when(path) {
+            "", "/" -> secure.trimEnd('/')+"/v1/live/sessions"
+            "/v1", "/v1/" -> secure.trimEnd('/')+"/live/sessions"
+            else -> secure
+        }
+        return full.takeIf(::validEndpoint)
+    }
+
+    fun validCredential(profile:LiveVoiceProfile,value:String)=
+        if(profile==LiveVoiceProfile.RELAY_TICKET) validTicket(value) else LiveExtractionClient.validKey(value)
+
+    fun start(profile:LiveVoiceProfile=LiveVoiceProfile.RELAY_TICKET):String = JSONObject()
         .put("type","session.start").put("event_id","pocket-live-start")
         .put("session",JSONObject()
-            .put("model","gpt-live-1.1")
-            .put("store",false)
+            .put("model",if(profile==LiveVoiceProfile.FOSS_LIVE) "local-live" else "gpt-live-1.1")
+            .apply {if(profile!=LiveVoiceProfile.FOSS_LIVE) put("store",false)}
             .put("instructions",
                 "You are a concise voice interface to one Herdr agent selected by the caller. " +
                 "Delegate when the caller asks the agent to do work. Never claim work was sent, completed or approved unless Pocket confirms it. " +
@@ -38,14 +55,15 @@ internal object LiveVoiceProtocol {
                 "When the agent needs input or approval, ask the caller to use the terminal. Do not delegate approvals or menu answers.")
             .put("audio",JSONObject()
                 .put("format",JSONObject().put("type","audio/pcm").put("rate",SAMPLE_RATE))
-                .put("output",JSONObject().put("voice","marin")))
+                .apply {if(profile!=LiveVoiceProfile.FOSS_LIVE) put("output",JSONObject().put("voice","marin"))})
             .put("delegation",JSONObject().put("type","client")))
         .toString()
 
-    fun commentary(id:String,content:String):String {
+    fun commentary(id:String,content:String,eventId:String?=null):String {
         require(validId(id) && content.isNotBlank() && content.toByteArray(Charsets.UTF_8).size<=475)
         return JSONObject().put("type","session.commentary.append")
-            .put("delegation_id",id).put("content",content).toString()
+            .put("delegation_id",id).put("content",content)
+            .apply {eventId?.let {require(validId(it));put("event_id",it)}}.toString()
     }
 
     private fun validId(value:String)=value.length in 1..512 && value.all {it.code in 33..126}
@@ -59,13 +77,16 @@ internal object LiveVoiceProtocol {
 
     sealed interface Event {
         data object Started:Event
+        data class ClearAudio(val epoch:Long?):Event
         data object Closed:Event
         data object Error:Event
         data object Ignore:Event
-        data class Audio(val bytes:ByteArray):Event
+        data class Audio(val bytes:ByteArray,val epoch:Long?=null):Event
         data class InputTranscript(val id:String,val text:String,val start:Long,val end:Long):Event
-        data class Delegation(val id:String,val offset:Long):Event
+        data class Delegation(val id:String,val offset:Long?,val task:String?=null):Event
     }
+
+    private fun epoch(event:JSONObject) = (event.opt("epoch") as? Number)?.toLong()?.takeIf {it>=0}
 
     fun parse(message:String):Event = runCatching {
         val event=JSONObject(message)
@@ -83,7 +104,7 @@ internal object LiveVoiceProtocol {
                 val delta=(event.opt("delta") as? String)?.takeIf {it.length in 1..180_000}
                     ?: return@runCatching Event.Error
                 val bytes=Base64.getDecoder().decode(delta)
-                if(bytes.size>=2 && bytes.size%2==0) Event.Audio(bytes) else Event.Error
+                if(bytes.size>=2 && bytes.size%2==0) Event.Audio(bytes,epoch(event)) else Event.Error
             }
             "session.input_transcript.delta" -> {
                 val id=(event.opt("event_id") as? String)?.takeIf(::validId) ?: return@runCatching Event.Ignore
@@ -96,9 +117,12 @@ internal object LiveVoiceProtocol {
                 val delegation=event.optJSONObject("delegation")?.takeIf {it.opt("target")=="client"}
                     ?: return@runCatching Event.Ignore
                 val id=(delegation.opt("id") as? String)?.takeIf(::validId) ?: return@runCatching Event.Ignore
-                val offset=timestamp(event.opt("offset_ms")) ?: return@runCatching Event.Ignore
-                Event.Delegation(id,offset)
+                val offset=timestamp(event.opt("offset_ms"))
+                val task=(delegation.opt("task") as? String)?.takeIf {it.length in 1..4000 && it.isNotBlank()}
+                if(offset==null && task==null) return@runCatching Event.Ignore
+                Event.Delegation(id,offset,task)
             }
+            "session.output_audio.cleared" -> Event.ClearAudio(epoch(event))
             "session.closed" -> Event.Closed
             "error" -> Event.Error
             else -> Event.Ignore

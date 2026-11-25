@@ -28,8 +28,8 @@ internal class LiveVoiceSocket:AutoCloseable {
     private var input:InputStream?=null
     private var output:OutputStream?=null
 
-    fun connect(endpoint:URI,ticket:String) {
-        require(LiveVoiceProtocol.endpoint(endpoint.toASCIIString())==endpoint && LiveVoiceProtocol.validTicket(ticket))
+    fun connect(endpoint:URI,bearer:String) {
+        require(LiveVoiceProtocol.endpoint(endpoint.toASCIIString())==endpoint && LiveExtractionClient.validKey(bearer))
         val host=endpoint.host.removeSurrounding("[","]")
         val port=if(endpoint.port==-1) 443 else endpoint.port
         val raw=Socket()
@@ -48,7 +48,7 @@ internal class LiveVoiceSocket:AutoCloseable {
             val nonce=Base64.getEncoder().encodeToString(ByteArray(16).also(random::nextBytes))
             val request="GET ${endpoint.rawPath} HTTP/1.1\r\nHost: ${endpoint.rawAuthority}\r\n"+
                 "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: $nonce\r\n"+
-                "Sec-WebSocket-Version: 13\r\nAuthorization: Bearer $ticket\r\n\r\n"
+                "Sec-WebSocket-Version: 13\r\nAuthorization: Bearer $bearer\r\n\r\n"
             outbound.write(request.toByteArray(Charsets.US_ASCII))
             outbound.flush()
             val headers=readHandshake(inbound)

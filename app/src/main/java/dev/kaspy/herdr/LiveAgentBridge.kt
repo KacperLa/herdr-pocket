@@ -11,7 +11,7 @@ internal object LiveAgentHerdr {
     }
     data class Capture(val status:Status,val screen:String)
     data class Reply(val stdout:String,val ok:Boolean)
-    data class Result(val message:String,val review:String?=null,val capture:Capture?=null)
+    data class Result(val message:String,val review:String?=null,val capture:Capture?=null,val question:Boolean=false,val evidence:String?=null)
 
     private fun pane(location:TuiLocation)=TuiAgents.quote(TuiLocation.requireSafe(location.paneId))
     fun get(location:TuiLocation,session:String?)=TuiAgents.resolve("agent get "+pane(location),session)
@@ -101,12 +101,17 @@ internal object LiveAgentHerdr {
             return if(text!=null && after==expected) Capture(expected,text) else null
         }
 
+        suspend fun observable(instance:Instance):Capture? {
+            val state=current()?.takeIf {it.instance==instance && (it.ready || it.state=="blocked")} ?: return null
+            return capture(state)
+        }
+
         suspend fun ready(instance:Instance):Capture? {
             val before=current()?.takeIf {it.instance==instance && it.ready} ?: return null
             return capture(before)?.takeUnless {mayHaveActiveMenu(it.screen)}
         }
 
-        suspend fun isCurrent(expected:Capture)=ready(expected.status.instance)==expected
+        suspend fun isCurrent(expected:Capture)=capture(expected.status)==expected
 
         suspend fun submit(expected:Capture,text:String):Boolean? {
             // A second full capture revalidates the screen after the user's review.
@@ -121,6 +126,7 @@ internal object LiveAgentHerdr {
             before:Capture,text:String,
             attempts:Int=180,pause:suspend ()->Unit={delay(620)},
             nowMs:()->Long={System.nanoTime()/1_000_000},
+            extraction:LiveTurnExtraction?=null,
         ):Result {
             var working=false
             var candidate:Capture?=null
@@ -130,25 +136,41 @@ internal object LiveAgentHerdr {
                 val state=current() ?: return Result("Pocket lost the agent. Check its terminal before sending anything again.")
                 if(state.instance!=before.status.instance || state.sequence<before.status.sequence)
                     return Result("The selected agent changed. Pocket stopped tracking this request.")
-                if(state.state=="blocked")
+                if(state.state=="blocked" && extraction==null)
                     return Result("The agent is waiting for input or approval. Review its terminal. Pocket did not answer or approve anything.")
                 if(state.state=="working" && state.sequence>before.status.sequence) {
                     working=true
                     candidate=null
                 }
                 val newCompletion=state.completion?.let {it>maxOf(before.status.sequence,before.status.completion ?: 0uL)}==true
-                if(state.ready && state.sequence>before.status.sequence && (working || newCompletion)) {
+                val completed=state.ready && state.sequence>before.status.sequence && (working || newCompletion)
+                if(completed || state.state=="blocked" && state.sequence>before.status.sequence) {
                     val settled=capture(state)
                     val now=nowMs()
                     if(settled!=candidate) {
                         candidate=settled
                         candidateSince=now
                     } else if(settled!=null && now-candidateSince>=2000) {
+                        if(extraction!=null) {
+                            val observed=extraction.inspect(before.screen,settled.screen,text,completed)
+                            if(!isCurrent(settled)) {
+                                candidate=null
+                                return@repeat
+                            }
+                            if(observed.kind==LiveTurnExtraction.Kind.QUESTION || state.state=="blocked" ||
+                                mayHaveActiveMenu(settled.screen)) return Result(
+                                "The agent is waiting for input. Pocket did not answer or approve anything. Check its terminal.",
+                                observed.draft.takeIf {observed.kind==LiveTurnExtraction.Kind.QUESTION},settled,
+                                question=true,evidence=observed.evidence)
+                            if(observed.kind==LiveTurnExtraction.Kind.COMPLETION)
+                                return Result("Herdr reported completion.",observed.draft,settled,evidence=observed.evidence)
+                            return Result("Herdr stopped working, but Pocket could not verify a fresh reply. Check the terminal.")
+                        }
                         if(mayHaveActiveMenu(settled.screen)) return Result(
                             "The terminal appears to be waiting for a choice. Review it directly; Pocket did not approve anything.")
                         return Result("Herdr reported completion.",freshExcerpt(before.screen,settled.screen,text) ?: "",settled)
                     }
-                }
+                } else candidate=null
             }
             return Result("Pocket could not verify a completed answer. Check the terminal; no terminal text was shared.")
         }
@@ -178,7 +200,7 @@ internal class LiveVoiceTranscript {
 }
 
 internal data class PocketLiveReview(
-    val id:String,val kind:Kind,val draft:String,
+    val id:String,val kind:Kind,val draft:String,val evidence:String?=null,
 ) {
-    enum class Kind { PROMPT, REPLY }
+    enum class Kind { PROMPT, QUESTION, REPLY }
 }

@@ -29,12 +29,18 @@
     <string name="agent_files_upload_connection_lost_during">The connection closed during the upload. Check the destination folder before retrying; Pocket could not confirm whether the file was saved.</string>
     <string name="agent_files_upload_route_expired">The original upload destination is no longer available. Nothing was sent. Reopen the folder and choose the file again.</string>
     <string name="agent_files_upload_notice">File upload in progress</string>
+    <string name="agent_files_copy_path">Copy path</string>
+    <string name="agent_files_path_label">Remote path</string>
+    <string name="agent_files_copy_path_failure">Couldn’t copy the path.</string>
     <string name="agent_files_options_for">Options for %1$s</string>
     <string name="agent_files_delete">Delete file</string>
+    <string name="agent_files_remove_directory">Delete folder</string>
+    <string name="agent_files_remove_directory_warning">Only empty folders can be deleted. This removes the folder from the remote host and can’t be undone here.</string>
+    <string name="agent_files_delete_parent">Parent folder: %1$s</string>
     <string name="agent_files_delete_name">File: %1$s</string>
     <string name="agent_files_delete_folder">Folder: %1$s</string>
     <string name="agent_files_delete_warning">This removes the file from the remote host. It can’t be undone here.</string>
-    <string name="agent_files_deleting">Deleting file…</string>
+    <string name="agent_files_deleting">Deleting…</string>
     <string name="agent_files_zoom_in">Zoom in</string>
     <string name="agent_files_zoom_out">Zoom out</string>
     <string name="agent_files_zoom_fit">Fit</string>
@@ -45,6 +51,7 @@
     <string name="agent_files_folder_name">Folder name</string>
     <string name="agent_files_create">Create</string>
     <string name="agent_files_creating_folder">Creating folder…</string>
+    <string name="agent_settings_tab_label">Tab name</string>
     <string name="agent_settings_edit_name">Edit name</string>
     <string name="agent_settings_type">Type</string>
     <string name="agent_settings_description">Description</string>

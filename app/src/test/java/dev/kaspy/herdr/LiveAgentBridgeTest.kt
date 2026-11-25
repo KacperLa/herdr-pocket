@@ -75,6 +75,24 @@ class LiveAgentBridgeTest {
         assertNull(LiveAgentHerdr.status(status("idle",10),selected.copy(terminalId="different")))
     }
 
+    @Test fun settledBlockedCaptureExtractsAQuestionWithoutInput() = runBlocking {
+        val idle=status("idle",10)
+        val blocked=status("blocked",12)
+        val screen="Apply the patch?\nAllow once\nDeny"
+        val (route,commands)=fixture(status("working",11),
+            blocked,text(screen),blocked,blocked,text(screen),blocked,text(screen),blocked)
+        val capture=LiveAgentHerdr.Capture(LiveAgentHerdr.status(idle,selected)!!,original)
+        val extraction=LiveTurnExtraction { rules,_ -> org.json.JSONObject(
+            if(rules.contains("Copy the actual question")) """{"question":"Apply the patch?","choices":["Allow once","Deny"]}"""
+            else """{"kind":"question"}""")
+        }
+        var time=0L
+        val result=route.finish(capture,"run tests",attempts=3,pause={time+=2_000},nowMs={time},extraction=extraction)
+        assertTrue(result.question)
+        assertEquals("Apply the patch?\n1. Allow once\n2. Deny",result.review)
+        assertTrue(commands.none { "agent prompt" in it || "send-keys" in it })
+    }
+
     @Test fun outputsAreUtf8BoundedAndTranscriptMetadataIsNotACommand() {
         val b=LiveVoiceTranscript()
         b.add(LiveVoiceProtocol.Event.InputTranscript("one","Check",100,200))

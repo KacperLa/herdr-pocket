@@ -27,6 +27,36 @@ internal object TuiMutations {
         OPENCODE("opencode","OpenCode"), GEMINI("gemini","Gemini")
     }
 
+    enum class RenameTarget(val displayName:String) {
+        TAB("Tab"), AGENT("Agent"), PANE("Pane")
+    }
+
+    fun canRenameTarget(label:String,target:RenameTarget)=
+        if(target==RenameTarget.AGENT) canStart(label) else canRename(label)
+
+    fun inspectTarget(location:TuiLocation,target:RenameTarget,session:String?) =
+        inspectRenameTarget(location,target==RenameTarget.AGENT,session)
+
+    fun renameTarget(location:TuiLocation,target:RenameTarget,label:String,session:String?):String {
+        require(canRenameTarget(label,target))
+        return when(target) {
+            RenameTarget.TAB -> TuiAgents.resolve("tab rename "+quotedId(location.tabId)+" "+TuiAgents.quote(label),session)
+            RenameTarget.AGENT -> renameSelection(location,true,label,session)
+            RenameTarget.PANE -> renamePane(location,label,session)
+        }
+    }
+
+    fun confirmsTarget(json:String,location:TuiLocation,target:RenameTarget,expectedLabel:String?=null):Boolean {
+        // Before writing a tab label, verify that the selected live pane is still in that exact tab.
+        if(target!=RenameTarget.TAB || expectedLabel==null)
+            return confirmsRenameTarget(json,location,target==RenameTarget.AGENT,expectedLabel)
+        return runCatching {
+            val tab=result(json,"tab_info")?.optJSONObject("tab") ?: return false
+            tab.opt("tab_id")==location.tabId && tab.opt("workspace_id")==location.workspaceId &&
+                tab.opt("label")==expectedLabel
+        }.getOrDefault(false)
+    }
+
     private val slug=Regex("[a-z][a-z0-9_-]{0,31}")
     private val version=Regex("0\\.([0-9]{1,2})\\.([0-9]{1,2})(?:[-+][A-Za-z0-9.-]+)?")
     private val startVersionCheck="""
@@ -91,7 +121,7 @@ internal object TuiMutations {
         return when {
             "agent_name_taken" in codes -> "That agent name is already in use in Herdr."
             "agent_launch_pending" in codes -> "This agent is still starting. Try again when it is ready."
-            "agent_not_found" in codes || "pane_not_found" in codes ->
+            "agent_not_found" in codes || "pane_not_found" in codes || "tab_not_found" in codes ->
                 "The target is no longer available. Refresh before renaming."
             "invalid_agent_name" in codes -> "Herdr rejected the agent name. Use 1–32 lowercase letters, digits, hyphens or underscores, starting with a letter."
             else -> null

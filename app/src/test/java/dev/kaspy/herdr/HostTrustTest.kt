@@ -17,11 +17,41 @@ class HostTrustTest {
         assertEquals(pinA,trust.pin(a))
         assertNull(trust.offer(a,pinA,5))
     }
-    @Test fun changedKnownKeyCannotBecomeAnOfferOrOverwrite() {
+    @Test fun changedKeyCannotUseTheFirstUseFlow() {
         assertTrue(trust.accept(trust.offer(a,pinA,1)!!,a,1))
         assertNull(trust.offer(a,pinB,5))
-        assertFalse(trust.accept(FirstUseOffer(a,pinB,5),a,5))
+        assertFalse(trust.accept(HostTrustOffer(a,pinB,5),a,5))
         assertEquals(pinA,trust.pin(a))
+    }
+    @Test fun changedPinStaysPinnedUntilExplicitReplacement() {
+        pins[a]=pinA
+        val other=HostEndpoint.parse(a.host,"2222")!!
+        pins[other]=pinA
+        assertNull(trust.replacementOffer(a,pinA,7))
+        assertNull(trust.replacementOffer(a,"invalid",7))
+        val offer=trust.replacementOffer(a,pinB,7)!!
+        assertEquals(pinA,offer.previousPin)
+        assertEquals(pinA,trust.pin(a))
+        assertFalse(trust.accept(offer,a,8))
+        assertFalse(trust.accept(offer,other,7))
+        assertTrue(trust.accept(offer,a,7))
+        assertFalse(trust.accept(offer,a,7))
+        assertEquals(pinB,trust.pin(a))
+        assertEquals(pinA,trust.pin(other))
+    }
+    @Test fun replacementCannotOverwriteAMoreRecentPin() {
+        pins[a]=pinA
+        val offer=trust.replacementOffer(a,pinB,9)!!
+        val pinC="SHA256:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA"
+        pins[a]=pinC
+        assertFalse(trust.accept(offer,a,9))
+        assertEquals(pinC,trust.pin(a))
+    }
+    @Test fun failedReplacementIsNotReportedAsTrusted() {
+        pins[a]=pinA
+        val noWrite=HostTrust(pins::get){_,_ -> false}
+        assertFalse(noWrite.accept(noWrite.replacementOffer(a,pinB,1)!!,a,1))
+        assertEquals(pinA,noWrite.pin(a))
     }
     @Test fun cancelOrEndpointChangeInvalidatesPendingAcceptance() {
         val offer=trust.offer(a,pinA,4)!!

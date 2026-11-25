@@ -12,6 +12,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.DropdownMenuItem
@@ -84,7 +86,8 @@ import androidx.compose.ui.unit.sp
         }
     })
     val location=session.rosterPlacement
-    val workspace=location?.workspaceLabel.takeIf { !spacesMode }
+    val workspace=location?.workspaceLabel?.takeIf { !spacesMode && it.isNotBlank() }
+    val cardWorkspace=workspace.takeIf {agentCard && !pinnedTile}
     val hasGoToLabel=spacesMode && session.spacesName!=null
     val tab=location?.tabLabel?.takeUnless {hasGoToLabel || it.equals(name,ignoreCase=true)}
     val pane=location?.paneOrdinal?.takeUnless {hasGoToLabel}?.let {stringResource(R.string.roster_row_pane_number,it)}
@@ -98,7 +101,7 @@ import androidx.compose.ui.unit.sp
 
     var menuOpen by remember(session.address,enabled) { mutableStateOf(false) }
     val canOpenMenu=agentCard && (onRename!=null || onTogglePin!=null)
-    val renameResource=if(session.isAgent) R.string.roster_row_rename_agent else R.string.roster_row_rename
+    val renameResource=R.string.agent_settings_edit_name
     val menuLabel=when {
         canOpenMenu -> stringResource(R.string.roster_agent_options)
         onRename!=null -> stringResource(renameResource)
@@ -135,21 +138,31 @@ import androidx.compose.ui.unit.sp
             horizontalArrangement=Arrangement.spacedBy(14.dp),
         ) {
             if(session.isAgent && (compactAgent || spacesMode))
-                AgentFaceAvatar(avatarScope,session.address,avatarStatus,statusLabel.takeIf {compactAgent})
+                AgentFaceAvatar(avatarScope,session.address,avatarStatus,statusLabel)
             else if(session.isAgent) AgentStatusAvatar(avatarStatus)
             else TerminalAvatar()
-            Column(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(4.dp)) {
+            Column(
+                Modifier.weight(1f).then(if(cardWorkspace!=null) Modifier.align(Alignment.Top) else Modifier),
+                verticalArrangement=Arrangement.spacedBy(4.dp),
+            ) {
                 if(agentCard) {
-                    Text(name,color=foreground,fontSize=22.sp,fontWeight=FontWeight.SemiBold,maxLines=2,
-                        overflow=TextOverflow.Ellipsis)
+                    if(cardWorkspace==null) {
+                        AgentCardName(name,foreground)
+                    } else BoxWithConstraints(Modifier.fillMaxWidth()) {
+                        val workspaceMaxWidth=maxWidth*0.42f
+                        Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                            AgentCardName(name,foreground,Modifier.weight(1f).alignByBaseline())
+                            Text(cardWorkspace,Modifier.widthIn(max=workspaceMaxWidth).alignByBaseline(),
+                                color=secondary,fontSize=14.sp,maxLines=1,overflow=TextOverflow.Ellipsis)
+                        }
+                    }
                     agentCardSummary(session).description?.let {
                         // Text semantics retain the entire line, even when visually ellipsized.
                         Text(it,fontSize=15.sp,color=secondary,maxLines=1,overflow=TextOverflow.Ellipsis)
                     }
-                    if(spacesMode) Text(statusLabel,fontSize=15.sp,fontWeight=FontWeight.Medium)
                 } else {
                     Text(name,fontSize=22.sp,fontWeight=FontWeight.SemiBold,maxLines=2,overflow=TextOverflow.Ellipsis)
-                    Text(stateAndRunner,fontSize=15.sp,fontWeight=FontWeight.Medium)
+                    if(!spacesMode) Text(stateAndRunner,fontSize=15.sp,fontWeight=FontWeight.Medium)
                     val metadata=if(tui) breadcrumb.ifBlank {null} else session.address
                     metadata?.let { Text(it,fontSize=15.sp,color=scheme.onSurfaceVariant,
                         maxLines=2,overflow=TextOverflow.Ellipsis) }
@@ -177,6 +190,11 @@ import androidx.compose.ui.unit.sp
           }
       }
     }
+}
+
+@Composable private fun AgentCardName(name:String,foreground:Color,modifier:Modifier=Modifier) {
+    Text(name,modifier=modifier,color=foreground,fontSize=22.sp,fontWeight=FontWeight.SemiBold,
+        maxLines=2,overflow=TextOverflow.Ellipsis)
 }
 
 @Composable internal fun TerminalAvatar(diameter:androidx.compose.ui.unit.Dp=54.dp) {

@@ -33,6 +33,17 @@ class AgentFilesTest {
         }
     }
 
+    @Test fun clipboardUsesTheRawAbsoluteRemotePath() {
+        assertEquals("/", AgentFiles.clipboardPath("/"))
+        assertEquals("/file", AgentFiles.clipboardPath("/", "file"))
+        assertEquals("/work/sub folder", AgentFiles.clipboardPath("/work/sub folder/"))
+        val name = """ literal [1]*? \ file """
+        assertEquals("/work/$name", AgentFiles.clipboardPath("/work", name))
+        assertNull(AgentFiles.clipboardPath(null, "file"))
+        assertNull(AgentFiles.clipboardPath("relative", "file"))
+        assertNull(AgentFiles.clipboardPath("/work", "../other"))
+    }
+
     private fun snapshot(version: String, rows: String, panes: String = "") = """
         {"result":{"type":"session_snapshot","snapshot":{"version":"$version","agents":[$rows],"panes":[$panes]}}}
     """.trimIndent()

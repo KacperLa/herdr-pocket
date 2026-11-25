@@ -61,6 +61,33 @@ class LiveVoiceProtocolTest {
         assertEquals("Fresh result",reply.getString("content"))
     }
 
+    @Test fun customProfilesAcceptSecureUrlAndKeepSecretsOutOfSessionJson() {
+        assertEquals("wss://self.example/v1/live/sessions",LiveVoiceProtocol.normalizeEndpoint("https://self.example/v1"))
+        assertEquals("wss://proxy.example/custom",LiveVoiceProtocol.normalizeEndpoint("wss://proxy.example/custom"))
+        assertNull(LiveVoiceProtocol.normalizeEndpoint("https://api.openai.com/v1"))
+        assertNull(LiveVoiceProtocol.normalizeEndpoint("https://proxy.example/path?key=secret"))
+        assertTrue(LiveVoiceProtocol.validCredential(LiveVoiceProfile.GPT_LIVE,"proxy-key"))
+        assertFalse(LiveVoiceProtocol.validCredential(LiveVoiceProfile.GPT_LIVE,"abc\r\nInjected: value"))
+        val session=JSONObject(LiveVoiceProtocol.start(LiveVoiceProfile.FOSS_LIVE)).getJSONObject("session")
+        assertEquals("local-live",session.getString("model"))
+        assertFalse(session.getJSONObject("audio").has("output"))
+        assertFalse(session.has("store"))
+    }
+
+    @Test fun fossVoiceRoundTripDoesNotRequireTranscriptAndFlushesOnInterruption() {
+        val delegation=LiveVoiceProtocol.parse(
+            """{"type":"session.delegation.created","delegation":{"id":"del_demo","target":"client","task":"Check unit tests"}}"""
+        ) as LiveVoiceProtocol.Event.Delegation
+        assertEquals("Check unit tests",delegation.task)
+        assertNull(delegation.offset)
+        val outgoing=JSONObject(LiveVoiceProtocol.commentary(delegation.id,"All checks passed.","evt_result"))
+        assertEquals("del_demo",outgoing.getString("delegation_id"))
+        assertEquals("evt_result",outgoing.getString("event_id"))
+        assertEquals("All checks passed.",outgoing.getString("content"))
+        assertTrue(LiveVoiceProtocol.parse("""{"type":"session.output_audio.delta","delta":"AAABAA==","epoch":1}""") is LiveVoiceProtocol.Event.Audio)
+        assertEquals(LiveVoiceProtocol.Event.ClearAudio(2),LiveVoiceProtocol.parse("""{"type":"session.output_audio.cleared","epoch":2}"""))
+    }
+
     @Test fun rejectsRedirectsBadHandshakeAndMaskedServerFrames() {
         val nonce="dGhlIHNhbXBsZSBub25jZQ=="
         val handshake="HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: keep-alive, Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n"

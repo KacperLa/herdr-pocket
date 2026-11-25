@@ -8,7 +8,6 @@ import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import java.io.IOException
-import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -17,20 +16,21 @@ import kotlin.math.sqrt
 /** The owner must request permission and close this engine as soon as its visible route ends. */
 internal class LiveVoiceEngine(
     private val endpoint:String,
-    ticket:String,
+    bearer:String,
+    private val profile:LiveVoiceProfile,
     private val onState:(LiveVoiceState)->Unit,
     private val onError:(String)->Unit,
     private val onLevel:(Float)->Unit={},
     private val onEvent:(LiveVoiceProtocol.Event)->Unit={},
 ):AutoCloseable {
-    private val key=AtomicReference<String?>(ticket)
+    private val key=AtomicReference<String?>(bearer)
     private val started=AtomicBoolean()
     private val closed=AtomicBoolean()
     private val finishing=AtomicBoolean()
     private val ready=AtomicBoolean()
     private val state=AtomicReference<LiveVoiceState?>()
     private val socket=LiveVoiceSocket()
-    private val chunks=ArrayBlockingQueue<ByteArray>(12)
+    private val chunks=LiveAudioQueue()
     private val audioGate=Any()
     private val capture=AtomicReference<AudioRecord?>()
     private val playback=AtomicReference<AudioTrack?>()
@@ -48,10 +48,10 @@ internal class LiveVoiceEngine(
     private fun receive() {
         try {
             val address=LiveVoiceProtocol.endpoint(endpoint) ?: throw Setup("Enter a valid secure Live WebSocket URL.")
-            val token=key.getAndSet(null)?.takeIf(LiveVoiceProtocol::validTicket) ?: throw Setup("Enter a fresh Live Voice relay ticket.")
+            val token=key.getAndSet(null)?.takeIf {LiveVoiceProtocol.validCredential(profile,it)} ?: throw Setup("Check the Live Voice credential in Settings.")
             if(closed.get()) return
             socket.connect(address,token)
-            socket.text(LiveVoiceProtocol.start())
+            socket.text(LiveVoiceProtocol.start(profile))
             var sessionStarted=false
             val initialDeadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(20)
             while(!closed.get()) {
@@ -71,10 +71,13 @@ internal class LiveVoiceEngine(
                     }
                     is LiveVoiceProtocol.Event.Audio -> {
                         if(finishing.get()) event.bytes.fill(0)
-                        else if(!sessionStarted || !chunks.offer(event.bytes)) throw IOException()
+                        else if(!sessionStarted || !synchronized(audioGate) {
+                            chunks.offer(event)
+                        }) throw IOException()
                     }
+                    is LiveVoiceProtocol.Event.ClearAudio -> if(sessionStarted) clearPlayback(event.epoch)
                     LiveVoiceProtocol.Event.Closed -> return
-                    LiveVoiceProtocol.Event.Error -> throw Setup("The endpoint rejected or interrupted the GPT-Live session. Check the relay, ticket and GPT-Live model access.")
+                    LiveVoiceProtocol.Event.Error -> throw Setup("The endpoint rejected or interrupted the GPT-Live session. Check the service type, API key, and Live endpoint.")
                     is LiveVoiceProtocol.Event.InputTranscript, is LiveVoiceProtocol.Event.Delegation ->
                         if(sessionStarted && !finishing.get()) onEvent(event)
                     LiveVoiceProtocol.Event.Ignore -> Unit
@@ -153,20 +156,29 @@ internal class LiveVoiceEngine(
                 sink.play()
             }
             while(!closed.get() && !finishing.get()) {
-                val data=chunks.poll(150,TimeUnit.MILLISECONDS)
-                if(data==null) {
+                val packet=chunks.poll(150)
+                if(packet==null) {
                     if(playing.getAndSet(false)) update(LiveVoiceState.LISTENING)
                     continue
                 }
-                playing.set(true)
-                update(LiveVoiceState.SPEAKING)
-                if(!closed.get()) onLevel(level(data,data.size))
+                val data=packet.bytes
                 try {
                     var sent=0
                     while(!closed.get() && !finishing.get() && sent<data.size) {
-                        val count=sink.write(data,sent,data.size-sent,AudioTrack.WRITE_BLOCKING)
-                        if(count<=0) throw IOException()
-                        sent+=count
+                        val count=synchronized(audioGate) {
+                            if(!chunks.current(packet) || closed.get() || finishing.get()) -1
+                            else {
+                                if(!playing.getAndSet(true)) update(LiveVoiceState.SPEAKING)
+                                sink.write(data,sent,data.size-sent,AudioTrack.WRITE_NON_BLOCKING)
+                                    .also {if(it<0) throw IOException()}
+                            }
+                        }
+                        if(count==-1) break
+                        if(count==0) Thread.sleep(8)
+                        else {
+                            if(sent==0) onLevel(level(data,data.size))
+                            sent+=count
+                        }
                     }
                 } finally {data.fill(0)}
             }
@@ -205,8 +217,8 @@ internal class LiveVoiceEngine(
 
     fun commentary(id:String,text:String) {
         if(ready.get() && !closed.get() && !finishing.get()) {
-            socket.text(LiveVoiceProtocol.commentary(id,text))
-        }
+            socket.text(LiveVoiceProtocol.commentary(id,text,"pocket-"+java.util.UUID.randomUUID()))
+        } else throw IOException("Voice session is not active")
     }
 
     /** User Stop can finalize briefly; stale route/background must use force-close instead. */
@@ -220,6 +232,18 @@ internal class LiveVoiceEngine(
         worker("pocket-live-close-timeout") {
             Thread.sleep(2000)
             close()
+        }
+    }
+
+    private fun clearPlayback(remoteEpoch:Long?) {
+        synchronized(audioGate) {
+            chunks.clear(remoteEpoch)
+            playback.get()?.let {
+                runCatching {it.pause();it.flush();if(!closed.get() && !finishing.get()) it.play()}
+            }
+            playing.set(false)
+            onLevel(0f)
+            update(LiveVoiceState.LISTENING)
         }
     }
 
@@ -239,7 +263,7 @@ internal class LiveVoiceEngine(
         reader.get()?.interrupt()
         microphone.get()?.interrupt()
         player.get()?.interrupt()
-        while(true) {val data=chunks.poll() ?: break;data.fill(0)}
+        chunks.clear()
         onState(LiveVoiceState.STOPPED)
     }
 
