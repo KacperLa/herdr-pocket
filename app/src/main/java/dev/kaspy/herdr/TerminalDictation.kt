@@ -34,6 +34,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.AwaitPointerEventScope
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -45,6 +46,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -108,6 +110,7 @@ internal fun TerminalDictationControls(
     }
     val phase = dictation.phase
     val micCoordinates = remember { DictationMicCoordinates() }
+    val haptics by rememberUpdatedState(LocalHapticFeedback.current)
     val canBeginPress by rememberUpdatedState(buttonEnabled && !dictation.permissionPending && take == null)
     val currentAskPermission by rememberUpdatedState<() -> Unit>({
         permission.launch(Manifest.permission.RECORD_AUDIO)
@@ -169,7 +172,7 @@ internal fun TerminalDictationControls(
             down.consume()
             // Wrap a nullable up event so a canceled short press is distinct from the timeout.
             val early = withTimeoutOrNull(holdTimeout) {
-                DictationEarlyRelease(waitForDictationUp(down.id))
+                DictationEarlyRelease(waitForDictationUp(down.id, down.position))
             }
             if (early != null) {
                 early.up?.consume()
@@ -181,6 +184,7 @@ internal fun TerminalDictationControls(
             if (currentTerminal() !== pressedTerminal || !canBeginPress) return@awaitEachGesture
             val ticket = dictation.beginHold(currentAskPermission) ?: return@awaitEachGesture
             try {
+                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                 val up = waitForDictationUp(down.id)
                 if (up != null) {
                     up.consume()
@@ -238,12 +242,15 @@ private class DictationMicCoordinates {
 
 private class DictationEarlyRelease(val up: PointerInputChange?)
 
-private suspend fun AwaitPointerEventScope.waitForDictationUp(id: PointerId): PointerInputChange? {
+private suspend fun AwaitPointerEventScope.waitForDictationUp(
+    id: PointerId, start: Offset? = null,
+): PointerInputChange? {
     while (true) {
         val event = awaitPointerEvent(PointerEventPass.Initial)
         val touch = event.changes.firstOrNull { it.id == id } ?: return null
         if (event.changes.any { it.id != id && it.pressed } ||
             touch.isConsumed || touch.isOutOfBounds(size, extendedTouchPadding)) return null
+        if (start != null && (touch.position - start).getDistance() > viewConfiguration.touchSlop) return null
         if (touch.changedToUp()) return touch
         if (!touch.pressed) return null
     }
