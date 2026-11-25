@@ -318,6 +318,23 @@ class TuiAgentsTest {
         assertEquals(listOf("a","b","c"),space.rows.map {it.address})
     }
 
+    @Test fun unnamedFirstTabKeepsTheSameSpacesLabelWhenAnotherTabIsAdded() {
+        fun label(withSecondTab:Boolean, firstLabel:String=""):String? {
+            val first="""{"workspace_id":"w","tab_id":"t9"$firstLabel}"""
+            val tabs=if(withSecondTab) """$first,{"workspace_id":"w","tab_id":"t2"}""" else first
+            val payload="""{"result":{"type":"session_snapshot","snapshot":{
+              "workspaces":[{"workspace_id":"w","label":"Projects"}],
+              "tabs":[$tabs],
+              "panes":[{"workspace_id":"w","tab_id":"t9","pane_id":"p","terminal_id":"shell"}],
+              "agents":[]
+            }}}"""
+            return spacesRoster(TuiAgents.parse(payload)).single().rows.single().spacesName
+        }
+        assertEquals("Terminal · 1",label(false))
+        assertEquals(label(false),label(true))
+        assertEquals("Dev shell",label(false,""", "label":"Dev shell","custom_label":true"""))
+    }
+
     @Test fun goToLabelsFollowNamedTabsAndSplitPositionsWithoutChangingAgentIdentity() {
         val payload="""{"result":{"type":"session_snapshot","snapshot":{
           "workspaces":[{"workspace_id":"w8","label":"Projects","branch":"feature/test"}],

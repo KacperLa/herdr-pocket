@@ -242,9 +242,7 @@ internal object TuiAgents {
                 val paneName=name ?: title ?: provider ?: "Terminal"
                 return listOfNotNull(namedTab?.takeIf {it!=paneName},paneName,ordinal.toString()).joinToString(" · ")
             }
-            return name ?: namedTab ?: title ?: if((tabOrder[location.workspaceId]?.size ?: 0)>1 && tabLabel!=null) {
-                "${provider ?: "Terminal"} · $tabLabel"
-            } else displayText(workspaceById[location.workspaceId]?.opt("label"),120)
+            return name ?: namedTab ?: title ?: tabLabel?.let { "${provider ?: "Terminal"} · $it" }
         }
 
         // The public TabInfo.number is an identity, not its one-based position.
