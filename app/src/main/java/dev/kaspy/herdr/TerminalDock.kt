@@ -85,7 +85,7 @@ internal fun TerminalDock(
     fun canSend()=active && m.speechTerminalIdentity()===terminalIdentity
     BackHandler(enabled=directionsExpanded) { directionsExpanded=false }
     TerminalDictationControls(enabled=inputEnabled && m.dictationEnabled,terminalIdentity=m::speechTerminalIdentity,send=m::sendDictation,
-        onExclusiveDock={directionsExpanded=false}) { mic ->
+        provider=m.dictationProvider,onExclusiveDock={directionsExpanded=false}) { mic ->
         Surface(
             modifier=Modifier.fillMaxWidth().padding(horizontal=8.dp,vertical=5.dp),
             shape=CircleShape,

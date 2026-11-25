@@ -114,6 +114,13 @@ import kotlin.math.ceil
 
 class PocketModel(app: Application) : AndroidViewModel(app) {
     private val prefs = app.getSharedPreferences("workspace", 0)
+    internal var dictationProvider by mutableStateOf(DictationProvider.fromKey(prefs.getString("dictation_provider",null)))
+        private set
+    internal fun selectDictationProvider(provider:DictationProvider) {
+        if(provider.issue(getApplication<Application>())!=null && provider==DictationProvider.PARAKEETYPE) return
+        dictationProvider=provider
+        prefs.edit().putString("dictation_provider",provider.key).apply()
+    }
     private val startupGate=StartupReconnect()
     private val resolver:ContentResolver=app.contentResolver
     private val vault=PassphraseVault(app)
@@ -2451,6 +2458,9 @@ private fun ConnectionSettingsScreen(
             ConnectionSection(R.string.connection_alerts_section) {
                 AgentWatchSettings(m.notificationsEnabled,notificationsAllowed,m.watchLeaseToken!=null,
                     setAgentNotifications,openAndroidNotificationSettings)
+            }
+            ConnectionSection(R.string.dictation_settings_title) {
+                DictationProviderSettings(m.dictationProvider,m::selectDictationProvider)
             }
             ConnectionSection(R.string.connection_advanced_section) {
                 TextButton(onClick={advanced=!advanced}) {

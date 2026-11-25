@@ -48,6 +48,7 @@ import java.util.Locale
 @Composable
 internal fun TerminalDictationControls(
     enabled: Boolean,
+    provider: DictationProvider,
     terminalIdentity: () -> Any?,
     send: (Any, String, () -> Boolean, (Boolean) -> Unit) -> Boolean,
     onExclusiveDock: () -> Unit,
@@ -57,8 +58,9 @@ internal fun TerminalDictationControls(
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val currentTerminal by rememberUpdatedState({ if (enabled) terminalIdentity() else null })
     val currentSend by rememberUpdatedState(send)
+    val currentProvider by rememberUpdatedState(provider)
     val dictation = remember(context, lifecycle) {
-        TerminalDictation(context, { currentTerminal() }, {
+        TerminalDictation(context, { currentTerminal() }, { currentProvider }, {
             lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
         }) { terminal, text, allowed, completed -> currentSend(terminal, text, allowed, completed) }
     }
@@ -172,6 +174,7 @@ internal fun TerminalDictationControls(
 private class TerminalDictation(
     private val context: Context,
     private val terminalIdentity: () -> Any?,
+    private val selectedProvider: () -> DictationProvider,
     private val resumed: () -> Boolean,
     private val send: (Any, String, () -> Boolean, (Boolean) -> Unit) -> Boolean,
 ) {
@@ -188,6 +191,7 @@ private class TerminalDictation(
     var micLevels by mutableStateOf(emptyList<Float>())
         private set
     private var recognizer: SpeechRecognizer? = null
+    private var recordingProvider = DictationProvider.ANDROID
     private var capture: DictationCapture? = null
     private var captured: DictationPcm? = null
     private var audioPipe: DictationAudioPipe? = null
@@ -224,11 +228,12 @@ private class TerminalDictation(
             return
         }
         notice = null
-        if (!runCatching { SpeechRecognizer.isOnDeviceRecognitionAvailable(context) }.getOrDefault(false)) {
-            startIssue = "Android didn’t report an on-device speech recognition service. Pocket doesn’t use cloud dictation. You can use your keyboard’s voice typing instead."
+        val provider = selectedProvider()
+        provider.issue(context)?.let {
+            startIssue = context.getString(it.message)
             return
         }
-
+        recordingProvider = provider
         val granted = hasMicPermission()
         take = TerminalDictationTicket(terminal, granted)
         if (granted) {
@@ -319,6 +324,13 @@ private class TerminalDictation(
             cancel("The microphone returned silent audio. Check Android’s Microphone access or try the phone mic.", showToast = true)
             return
         }
+        val provider = recordingProvider
+        provider.issue(context)?.let {
+            pcm.close()
+            cancel(null)
+            startIssue = context.getString(it.message)
+            return
+        }
         transcriptionTimeout = dictationReplayTimeoutMillis(pcm.length, realTime)
         phase = DictationPhase.TRANSCRIBING
         micLevels = emptyList()
@@ -326,7 +338,7 @@ private class TerminalDictation(
             if (!realTime) savedReplay = pcm.copyForReplay()
             val pipe = DictationAudioPipe.open(pcm)
             audioPipe = pipe
-            val client = SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
+            val client = provider.newRecognizer(context)
             recognizer = client
             client.setRecognitionListener(listener(ticket, pipe, realTime))
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
@@ -505,8 +517,9 @@ private class TerminalDictation(
                 retryAtRealTime(ticket)) return
             val language = Locale.getDefault().displayName
             val message = when (error) {
-                SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ->
-                    "The offline speech model for $language is unavailable. Check Android’s speech settings."
+                SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> if (recordingProvider == DictationProvider.PARAKEETYPE)
+                    "Parakeetype’s model isn’t ready. Open Parakeetype and import its speech model. Nothing was sent."
+                else "The offline speech model for $language is unavailable. Check Android’s speech settings."
                 SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ->
                     "Android’s on-device speech service doesn’t support $language."
                 SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT ->
