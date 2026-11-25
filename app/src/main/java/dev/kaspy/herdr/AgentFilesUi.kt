@@ -639,13 +639,14 @@ private fun PreviewOptionsMenu(
 @Composable
 private fun CopyPathMenuItem(path: String, onDismiss: () -> Unit) {
     val context = LocalContext.current
+    val label = stringResource(R.string.agent_files_path_label)
     DropdownMenuItem(
         text = { Text(stringResource(R.string.agent_files_copy_path)) },
         onClick = {
             onDismiss()
             val copied = runCatching {
                 val clipboard = checkNotNull(context.getSystemService(ClipboardManager::class.java))
-                clipboard.setPrimaryClip(ClipData.newPlainText(context.getString(R.string.agent_files_path_label), path))
+                clipboard.setPrimaryClip(ClipData.newPlainText(label, path))
             }.isSuccess
             if (!copied) Toast.makeText(context, R.string.agent_files_copy_path_failure, Toast.LENGTH_SHORT).show()
         },
