@@ -25,7 +25,12 @@ data class HostEndpoint private constructor(val host: String, val port: Int) {
     }
 }
 
-internal data class FirstUseOffer(val endpoint: HostEndpoint, val fingerprint: String, val generation: Long)
+internal data class HostTrustOffer(
+    val endpoint: HostEndpoint,
+    val fingerprint: String,
+    val generation: Long,
+    val previousPin: String? = null,
+)
 
 internal class HostTrust(
     private val read: (HostEndpoint) -> String?,
@@ -33,16 +38,22 @@ internal class HostTrust(
 ) {
     fun pin(endpoint: HostEndpoint): String? = read(endpoint)
 
-    fun offer(endpoint: HostEndpoint, actual: String, generation: Long): FirstUseOffer? =
-        if (pin(endpoint) == null && isSshSha256Pin(actual)) FirstUseOffer(endpoint, actual, generation) else null
+    fun offer(endpoint: HostEndpoint, actual: String, generation: Long): HostTrustOffer? =
+        if (pin(endpoint) == null && isSshSha256Pin(actual)) HostTrustOffer(endpoint, actual, generation) else null
 
-    fun accept(offer: FirstUseOffer, endpoint: HostEndpoint?, generation: Long): Boolean =
+    // Only a fresh, explicitly requested no-authentication probe can produce a replacement.
+    fun replacementOffer(endpoint: HostEndpoint, actual: String, generation: Long): HostTrustOffer? {
+        val previous = pin(endpoint) ?: return null
+        return if (actual != previous && isSshSha256Pin(actual))
+            HostTrustOffer(endpoint, actual, generation, previous) else null
+    }
+
+    fun accept(offer: HostTrustOffer, endpoint: HostEndpoint?, generation: Long): Boolean =
         endpoint == offer.endpoint && generation == offer.generation &&
-            remember(offer.endpoint, offer.fingerprint)
+            isSshSha256Pin(offer.fingerprint) && offer.fingerprint != offer.previousPin &&
+            pin(offer.endpoint) == offer.previousPin && write(offer.endpoint, offer.fingerprint)
 
     fun legacyPinToMigrate(endpoint: HostEndpoint?, value: String?): String? =
         value?.trim()?.takeIf { endpoint != null && pin(endpoint) == null && isSshSha256Pin(it) }
 
-    private fun remember(endpoint: HostEndpoint, fingerprint: String): Boolean =
-        isSshSha256Pin(fingerprint) && pin(endpoint) == null && write(endpoint, fingerprint)
 }

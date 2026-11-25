@@ -457,28 +457,42 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
     var demo by mutableStateOf(false)
     var observedPin by mutableStateOf<String?>(null)
         private set
-    internal var offeredTrust by mutableStateOf<FirstUseOffer?>(null)
+    internal var offeredTrust by mutableStateOf<HostTrustOffer?>(null)
         private set
     private data class Request(val list:Boolean,val autoPick:Boolean,val backend:AgentBackend,val tuiSession:String?)
-    private data class Probe(val endpoint:HostEndpoint,val generation:Long,val resumeRequest:Request?=null)
+    private data class Probe(val endpoint:HostEndpoint,val generation:Long,val reviewChange:Boolean,val resumeRequest:Request?=null)
     private var probeContext:Probe?=null
     private var offeredRequest:Request?=null
+    private var hostKeyMismatch by mutableStateOf(false)
+    val canReviewHostKey get()=hostKeyMismatch && !busy
     private fun invalidateOffer() {
-        offeredTrust=null;offeredRequest=null;observedPin=null
+        offeredTrust=null;offeredRequest=null;observedPin=null;hostKeyMismatch=false
         if(probeContext!=null) {
             generation++;ssh.disconnect();busy=false;listing=false;probeContext=null
             status="Host check canceled."
         }
     }
-    fun rejectHost() {invalidateOffer();passphrase="";status="Host not trusted. No authentication was sent."}
-    fun trustOfferedHost() {
-        val offer=offeredTrust ?: return
+    internal fun rejectHost(offer:HostTrustOffer) {
+        if(offeredTrust!==offer) return
+        val replacing=offer.previousPin!=null
+        invalidateOffer();passphrase="";saveTypedPassphrase=false
+        hostKeyMismatch=replacing
+        status=if(replacing) "Saved host fingerprint unchanged. No authentication was sent."
+            else "Host not trusted. No authentication was sent."
+    }
+    internal fun trustOfferedHost(offer:HostTrustOffer) {
+        if(offeredTrust!==offer) return
         val request=offeredRequest
         if(!hostTrust.accept(offer,selectedEndpoint,generation)) {
             invalidateOffer();status="Host not saved. Check its fingerprint again.";return
         }
         pinRevision++
         invalidateOffer()
+        if(offer.previousPin!=null) {
+            passphrase="";saveTypedPassphrase=false
+            status="SSH host fingerprint replaced. Connect again when ready."
+            return
+        }
         status="Host fingerprint saved on first use."
         if(request!=null) connect(list=request.list, autoSelect=request.autoPick,backend=request.backend,tuiSessionName=request.tuiSession)
     }
@@ -2082,6 +2096,9 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                 is SshSession.Event.TransportLost -> reattachAfterLoss()
                 is SshSession.Event.RejectedHostKey -> {
                     suspendCurrentTerminal()
+                    // Show verification instead of trapping a rejected reconnect on the stale terminal.
+                    retainedTerminal=false
+                    terminalVisible=false
                     reconnectOffered=false
                     reconnectTarget=null
                     val probe=probeContext
@@ -2091,14 +2108,20 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                     if(probe==null) passphrase=""
                     if(probe!=null && probe.generation==generation && probe.endpoint==selectedEndpoint) {
                         val expected=hostTrust.pin(probe.endpoint)
-                        offeredTrust=hostTrust.offer(probe.endpoint,event.actual,generation)
+                        hostKeyMismatch=expected!=null && expected!=event.actual
+                        offeredTrust=if(hostKeyMismatch && probe.reviewChange)
+                            hostTrust.replacementOffer(probe.endpoint,event.actual,generation)
+                        else hostTrust.offer(probe.endpoint,event.actual,generation)
                         offeredRequest=probe.resumeRequest
                         status=when {
                             expected==null -> "New SSH host. Confirm its fingerprint to continue."
                             expected==event.actual -> "Offered fingerprint matches the saved pin. No authentication sent."
                             else -> "HOST KEY MISMATCH. Connection rejected."
                         }
-                    } else status="HOST KEY MISMATCH. Connection rejected."
+                    } else {
+                        hostKeyMismatch=event.expected!=null && event.expected==storedPin && event.actual!=event.expected
+                        status="HOST KEY MISMATCH. Connection rejected."
+                    }
                 }
                 is SshSession.Event.Closed -> {
                     if(!listing) suspendCurrentTerminal()
@@ -2240,7 +2263,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
             else -> "Connecting…"
         }
         val request=++generation
-        if(checking) probeContext=Probe(endpoint,request,if(probe || attach!=null)null else Request(list,autoSelect,backend,namedSession))
+        if(checking) probeContext=Probe(endpoint,request,probe,if(probe || attach!=null)null else Request(list,autoSelect,backend,namedSession))
         val uri=keyUri
         val secret=if(checking) byteArrayOf() else passphrase.toByteArray(Charsets.UTF_8)
         val wantsSave=!checking && keyRemembered && saveTypedPassphrase && secret.isNotEmpty()
@@ -2490,18 +2513,25 @@ class MainActivity : ComponentActivity() {
  val spacesScroll=rememberLazyListState()
 
  m.offeredTrust?.let { offer ->
+    val replacing=offer.previousPin!=null
     PocketDialog(
-      onDismissRequest={m.rejectHost()},
-      title={Text("Trust this SSH host?")},
+      onDismissRequest={m.rejectHost(offer)},
+      title={Text(if(replacing) "SSH host identity changed" else "Trust this SSH host?")},
       text={
         Column(verticalArrangement=Arrangement.spacedBy(8.dp)) {
           Text(offer.endpoint.display,fontSize=20.sp)
-          Text(offer.fingerprint,fontSize=16.sp)
-          Text("This identity has not been independently verified. A fake server could be impersonating your host. Compare the fingerprint through a trusted route before accepting if you can.",fontSize=16.sp)
+          if(replacing) {
+            Text(stringResource(R.string.connection_saved_host_pin,offer.previousPin.orEmpty()),fontSize=16.sp)
+            Text(stringResource(R.string.connection_offered_host_pin,offer.fingerprint),fontSize=16.sp)
+            Text("A server reinstall or key rotation can cause this, but so can an impersonation attempt. Verify the new fingerprint through a trusted route before replacing the saved one.",fontSize=16.sp)
+          } else {
+            Text(offer.fingerprint,fontSize=16.sp)
+            Text("This identity has not been independently verified. A fake server could be impersonating your host. Compare the fingerprint through a trusted route before accepting if you can.",fontSize=16.sp)
+          }
         }
       },
-      confirmButton={TextButton(onClick={m.trustOfferedHost()}){Text("Trust on first use")}},
-      dismissButton={TextButton(onClick={m.rejectHost()}){Text("Cancel")}},
+      confirmButton={TextButton(onClick={m.trustOfferedHost(offer)}){Text(if(replacing) "Replace saved fingerprint" else "Trust on first use")}},
+      dismissButton={TextButton(onClick={m.rejectHost(offer)}){Text("Cancel")}},
     )
  }
 
@@ -2587,6 +2617,7 @@ private fun ConnectionSettingsScreen(
             ConnectionSection(R.string.connection_status_section) {
                 Text(m.status,style=MaterialTheme.typography.bodyLarge,
                     modifier=Modifier.semantics {liveRegion=LiveRegionMode.Polite})
+                if(m.canReviewHostKey) OutlinedButton(onClick={m.connect(probe=true)}) {Text("Review changed host key")}
                 if(m.canReconnect) OutlinedButton(onClick=m::reconnect) {Text(stringResource(R.string.reconnect))}
                 if(m.busy || m.hasRosterConnection) OutlinedButton(onClick={m.disconnect(manual=true)}) {
                     Text(if(m.status=="Connected · SSH PTY" || m.hasRosterConnection) "Disconnect" else "Cancel connection")

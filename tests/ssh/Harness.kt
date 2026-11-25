@@ -15,7 +15,20 @@ fun main() {
         val wrong = sshSha256Fingerprint(byteArrayOf(1,2,3))
         checkNotNull(ssh.connect(base.copy(expectedPin=wrong), File("local-client").readBytes(), passphrase(), cmd))
         check(event() == SshSession.Event.RejectedHostKey(pin, wrong))
-        checkNotNull(ssh.connect(base.copy(expectedPin=pin), File("local-client").readBytes(), passphrase(), cmd, pty=false))
+        val endpoint=HostEndpoint.parse(base.host,port)!!
+        val savedPins=mutableMapOf(endpoint to wrong)
+        val trust=HostTrust(savedPins::get) { host, fingerprint ->
+            savedPins[host]=fingerprint
+            true
+        }
+        // Explicit review opens a separate unauthenticated probe, never a fallback login.
+        checkNotNull(ssh.connect(base, byteArrayOf(), null, "true"))
+        val review=event() as SshSession.Event.RejectedHostKey
+        check(review.expected==null && review.actual==pin)
+        val offer=checkNotNull(trust.replacementOffer(endpoint,review.actual,1))
+        check(trust.pin(endpoint)==wrong)
+        check(trust.accept(offer,endpoint,1))
+        checkNotNull(ssh.connect(base.copy(expectedPin=trust.pin(endpoint)), File("local-client").readBytes(), passphrase(), cmd, pty=false))
         val listing = StringBuilder()
         val diagnostics = StringBuilder()
         while (true) {

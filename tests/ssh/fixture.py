@@ -388,7 +388,7 @@ with socket.socket(socket.AF_INET) as listener:
     listener.settimeout(25)
     pathlib.Path('fixture-info').write_text(f'{listener.getsockname()[1]}\n{pin}\n')
     events = []
-    for index in range(12):
+    for index in (0, 1, -1, *range(2, 12)):
         connection, _ = listener.accept()
         s = Server()
         t = paramiko.Transport(connection)
@@ -495,7 +495,10 @@ with socket.socket(socket.AF_INET) as listener:
             pass
         finally:
             t.close()
-            events.append(s.events)
+            if index == -1:
+                assert s.events == [], "review must not send any SSH authentication or commands"
+            else:
+                events.append(s.events)
     pathlib.Path('fixture-events').write_text(json.dumps(events))
     assert events[0] == [] and events[1] == []
     for e in events[2:5]:
