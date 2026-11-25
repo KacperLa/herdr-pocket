@@ -1585,6 +1585,10 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         coldRosterOperation=null
         busy=false
         listing=false
+        if(!startupInFlight && showSessionPicker && ssh.hasIdleTransport()) {
+            switchMessage=message
+            return
+        }
         if(finishStartup() || !showSessionPicker || switchSessions.isEmpty()) {
             reconnectOffered=reconnectTarget!=null
             cancelPicker()
@@ -1886,6 +1890,38 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
 
     private var resume:ResumeTarget?=null
     private fun clearResume() {initialTerminalOpening=null;coldAttach=false;dismissAgentMenu();authenticatedWatchTerminal=null;watchStartGate.reset();resume?.clear();resume=null;activeCoreAddress=null;displayedPty=null;terminalMouse.reset();clearAgentSwitcher()}
+    private fun returnToRosterAfterTerminalEnded(event:SshSession.Event.TerminalEnded) {
+        val target=resume ?: return
+        if((displayedPty!=null && displayedPty!==event.channel) || !ssh.hasIdleTransport()) return
+        // Keep credentials scoped to the existing verified host and named Herdr session.
+        val lease=RosterWatchLease(target.config,target.tuiSession,target.key.copyOf(),target.passphrase?.copyOf())
+        val backend=target.backend
+        clearRosterWatchLease()
+        finishStartup()
+        clearPendingSave()
+        clearResume()
+        replaceEmulator()
+        retainedTerminal=false
+        clearRetainedOutput()
+        terminalVisible=false
+        rememberCandidate=null
+        pendingColdWatchTerminal=null
+        requestedAgent=null
+        listedConfig=lease.config
+        listedTuiSession=lease.session
+        listedBackend=backend
+        rosterWatchLease=lease
+        sessions=emptyList()
+        showSessionPicker=true
+        showAgentSwitcher=true
+        reconnectTarget=reconnectTarget?.copy(mode=ReconnectMode.AgentSession(false,null,backend,lease.session))
+        reconnectOffered=false
+        busy=false
+        listing=false
+        status="Connected · SSH"
+        if(!listColdRoster()) failColdRoster("The terminal closed. Could not refresh the session list.")
+    }
+
     private fun reattachAfterLoss() {
         authenticatedWatchTerminal=null
         watchStartGate.reset()
@@ -1916,7 +1952,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             delay(1000L shl (target.retries-1))
             if(request!=generation || resume!==target) return@launch
-            try {listErrors.reset();checkNotNull(ssh.connect(target.config,target.key,target.passphrase,target.command,cols,rows))}
+            try {listErrors.reset();checkNotNull(ssh.connect(target.config,target.key,target.passphrase,target.command,cols,rows,keepTransportOnPtyClose=true))}
             catch(e:Exception) {busy=false;clearResume();reconnectOffered=true;status="Reattach stopped. Check connection details."}
         }
     }
@@ -2042,6 +2078,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                     coreShellCreate=null
                     switchingNewTerminal=false
                 }
+                is SshSession.Event.TerminalEnded -> returnToRosterAfterTerminalEnded(event)
                 is SshSession.Event.TransportLost -> reattachAfterLoss()
                 is SshSession.Event.RejectedHostKey -> {
                     suspendCurrentTerminal()
@@ -2264,7 +2301,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                     }.apply()
                 if(wantsSave && scope!=null) pendingSave=PendingSave(scope,secret.copyOf())
                 if(attach!=null) resume=ResumeTarget(cfg,key.copyOf(),credential?.copyOf(),cmd,attach.address,backend,namedSession)
-                checkNotNull(ssh.connect(cfg,key,credential,cmd,cols,rows,pty=!list,transportOnly=holdRosterTransport))
+                checkNotNull(ssh.connect(cfg,key,credential,cmd,cols,rows,pty=!list,transportOnly=holdRosterTransport,keepTransportOnPtyClose=attach!=null && !checking))
                 // The callback is posted to main. Promote this pending lease only after a successful roster response.
                 if(listing && (holdRosterTransport || backend==AgentBackend.TUI) && expected?.let(::isSshSha256Pin)==true)
                     pendingRosterWatchLease=RosterWatchLease(cfg,namedSession,key.copyOf(),credential?.copyOf())

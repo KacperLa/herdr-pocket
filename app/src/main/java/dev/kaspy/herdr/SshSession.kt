@@ -37,6 +37,8 @@ class SshSession(private val onEvent: (Long, Event) -> Unit) : AutoCloseable {
         data class ErrorOutput(val bytes: ByteArray) : Event
         data class RejectedHostKey(val actual: String, val expected: String?) : Event
         data class Closed(val exitStatus: Int?) : Event
+        /** A managed PTY ended; the pinned host transport is still authenticated. */
+        data class TerminalEnded(val channel: Any, val exitStatus: Int?) : Event
         /** An established PTY lost its SSH transport before an exit status arrived. */
         data object TransportLost : Event
         data class Failed(val message: String) : Event
@@ -62,7 +64,10 @@ class SshSession(private val onEvent: (Long, Event) -> Unit) : AutoCloseable {
         var pendingBytes = 0
     }
 
-    private class Attempt(val generation: Long, val initialSize: Size, @Volatile var pty: Boolean, val transportOnly: Boolean) {
+    private class Attempt(
+        val generation: Long, val initialSize: Size, @Volatile var pty: Boolean,
+        val transportOnly: Boolean, val keepHost: Boolean,
+    ) {
         @Volatile var socket: Socket? = null
         @Volatile var channel: ChannelExec? = null
         @Volatile var session: com.jcraft.jsch.Session? = null
@@ -114,6 +119,7 @@ class SshSession(private val onEvent: (Long, Event) -> Unit) : AutoCloseable {
         rows: Int = 24,
         pty: Boolean = true,
         transportOnly: Boolean = false,
+        keepTransportOnPtyClose: Boolean = false,
     ): Long? {
         val endpoint = config.copy(
             host = config.host.trim().removeSurrounding("[", "]"),
@@ -129,6 +135,7 @@ class SshSession(private val onEvent: (Long, Event) -> Unit) : AutoCloseable {
             "Enter the verified SHA256: fingerprint shown by OpenSSH."
         }
         require(command.isNotBlank() && '\u0000' !in command) { "An attach command is required." }
+        require(!keepTransportOnPtyClose || (pty && endpoint.expectedPin != null))
         require(!transportOnly || (!pty && endpoint.expectedPin != null)) { "An idle transport requires a pinned host and no PTY." }
         if (endpoint.expectedPin != null) {
             require(privateKey.size in 1..MAX_KEY_BYTES) { "Choose an SSH private key file (up to 128 KiB)." }
@@ -137,7 +144,7 @@ class SshSession(private val onEvent: (Long, Event) -> Unit) : AutoCloseable {
 
         return synchronized(lock) {
             if (permanentlyClosed || active != null) return@synchronized null
-            val attempt = Attempt(++generation, size(columns, rows, 0, 0), pty, transportOnly)
+            val attempt = Attempt(++generation, size(columns, rows, 0, 0), pty, transportOnly, transportOnly || keepTransportOnPtyClose)
             val keyCopy = if (endpoint.expectedPin != null) privateKey.copyOf() else null
             val passCopy = if (keyCopy != null) passphrase?.copyOf() else null
             active = attempt
@@ -149,7 +156,7 @@ class SshSession(private val onEvent: (Long, Event) -> Unit) : AutoCloseable {
     fun isCurrent(id: Long): Boolean = synchronized(lock) { !permanentlyClosed && generation == id }
 
     fun hasIdleTransport(): Boolean = synchronized(lock) {
-        active?.let { it.transportOnly && it.setupComplete && !it.ending && it.channel == null && it.session?.isConnected == true } == true
+        active?.let { it.keepHost && it.setupComplete && !it.ending && it.channel == null && it.session?.isConnected == true } == true
     }
 
     /** Opaque channel identity, not SSH transport generation: switching agents replaces it. */
@@ -555,7 +562,7 @@ class SshSession(private val onEvent: (Long, Event) -> Unit) : AutoCloseable {
         return synchronized(lock) {
             val attempt = active ?: return@synchronized null
             val session = attempt.session ?: return@synchronized null
-            val idle = attempt.transportOnly && attempt.channel == null
+            val idle = attempt.keepHost && attempt.channel == null
             val livePty = attempt.pty && attempt.channel?.isConnected == true
             if (permanentlyClosed || !attempt.setupComplete || attempt.ending ||
                 attempt.operation != null || !session.isConnected || (!idle && !livePty)
@@ -822,18 +829,7 @@ class SshSession(private val onEvent: (Long, Event) -> Unit) : AutoCloseable {
                 }
                 timer.cancel(false)
                 report(attempt, Event.TransportReady)
-                // An authenticated transport may deliberately have no channel yet.
-                // The first terminal, when selected, is staged by switchPty().
-                while (synchronized(lock) {
-                    if (active === attempt && session.isConnected && attempt.channel?.isClosed != true) true
-                    else { attempt.ending = true; false }
-                }) Thread.sleep(50)
-                val status = attempt.channel?.exitStatus?.takeIf { it >= 0 }
-                result = when {
-                    transportLost(attempt, session, status) -> Event.TransportLost
-                    !attempt.pty -> Event.Failed("The SSH connection closed before a terminal was opened.")
-                    else -> Event.Closed(status)
-                }
+                result = awaitManagedHost(attempt, session)
                 return
             }
             val channel = session.openChannel("exec") as ChannelExec
@@ -870,6 +866,10 @@ class SshSession(private val onEvent: (Long, Event) -> Unit) : AutoCloseable {
             timer.cancel(false)
             if (attempt.pty && attempt.desiredSize != dimensions) resizePending(attempt)
             report(attempt, Event.Connected)
+            if (attempt.keepHost) {
+                result = awaitManagedHost(attempt, session)
+                return
+            }
             while (synchronized(lock) {
                 val current = attempt.channel
                 if (active === attempt && session.isConnected && current?.isClosed == false) true
@@ -906,6 +906,37 @@ class SshSession(private val onEvent: (Long, Event) -> Unit) : AutoCloseable {
             }
             synchronized(attempt.outputOrder) { outcome?.let { report(attempt, it) } }
         }
+    }
+
+    /** Leave the SSH transport available for roster operations when only the PTY ends. */
+    private fun awaitManagedHost(attempt: Attempt, session: com.jcraft.jsch.Session): Event? {
+        while (true) {
+            val keepRunning = synchronized(attempt.outputOrder) {
+                val ended = synchronized(lock) {
+                    if (active !== attempt || !session.isConnected ||
+                        attempt.transportReadFailed || attempt.socket?.isClosed == true
+                    ) {
+                        attempt.ending = true
+                        null
+                    } else {
+                        val channel = attempt.channel
+                        // Let an in-flight switch commit or fail before clearing its old PTY.
+                        if (channel?.isClosed == true && attempt.operation == null) {
+                            attempt.channel = null
+                            attempt.input = null
+                            attempt.pty = false
+                            Event.TerminalEnded(channel, channel.exitStatus.takeIf { it >= 0 })
+                        } else null
+                    }
+                }
+                ended?.let { report(attempt, it) }
+                !attempt.ending
+            }
+            if (!keepRunning) break
+            Thread.sleep(50)
+        }
+        if (!isActive(attempt)) return null
+        return if (attempt.pty) Event.TransportLost else Event.Failed("The SSH connection to the host closed.")
     }
 
     private fun transportLost(attempt: Attempt, session: com.jcraft.jsch.Session?, exitStatus: Int?): Boolean {

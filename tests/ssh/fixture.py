@@ -439,6 +439,18 @@ with socket.socket(socket.AF_INET) as listener:
                 assert first.recv(100) == b'exit first'
                 first.send_exit_status(0)
                 first.close()
+                updated = expect_channel(t, s, LIST_SUFFIX)
+                updated.sendall(b'{"terminals":[{"address":"box/t3","name":"next","state":"live","agent":"bash"}],"hidden_finished":0}')
+                updated.send_exit_status(0)
+                updated.close()
+                second = expect_channel(t, s, ATTACH_SUFFIX)
+                second.sendall(b'second pane after exit')
+                assert second.recv(100) == b'close second without status'
+                second.close()
+                deadline = time.monotonic() + 5
+                while t.is_active() and time.monotonic() < deadline:
+                    time.sleep(.05)
+                assert not t.is_active()
                 continue
             ch = t.accept(6)
             if ch is not None:
@@ -514,4 +526,4 @@ with socket.socket(socket.AF_INET) as listener:
     assert [entry for entry in events[11] if entry[0] in ('none', 'publickey', 'password')] == [
         ['none', 'fixture'], ['publickey', 'fixture'], ['publickey', 'fixture']
     ]
-    assert len([entry for entry in events[11] if entry[0] == 'pty']) == 1
+    assert len([entry for entry in events[11] if entry[0] == 'pty']) == 2
