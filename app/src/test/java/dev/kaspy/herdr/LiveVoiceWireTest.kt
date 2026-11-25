@@ -78,7 +78,7 @@ class LiveVoiceWireTest {
                     }
                     for(content in listOf("""{"kind":"completion"}""",
                         """{"speech":"Seven checks passed.","evidence":"All seven checks passed."}""",
-                        """{"ok":true}""")) {
+                        """{"kind":"none"}""")) {
                         serverSocket.accept().use { peer ->
                             peer.soTimeout=8000
                             val input=peer.getInputStream()
@@ -90,10 +90,13 @@ class LiveVoiceWireTest {
                             assertEquals("fixture-model",message.getString("model"))
                             assertFalse(message.has("tools"))
                             val terminal=JSONObject(message.getJSONArray("messages").getJSONObject(1).getString("content"))
-                            if(content=="""{"ok":true}""") {
-                                assertEquals("synthetic",terminal.getString("check"))
-                                assertFalse(terminal.has("screen"))
+                            if(content=="""{"kind":"none"}""") {
+                                assertEquals("Codex · idle\n\n› Ask Codex to make a change",terminal.getString("screen"))
+                                assertFalse(terminal.getBoolean("completed_lifecycle"))
+                                assertFalse(terminal.has("before"))
                                 assertFalse(terminal.has("submitted"))
+                                assertEquals(LiveTurnExtraction.READINESS,
+                                    message.getJSONArray("messages").getJSONObject(0).getString("content"))
                             } else assertEquals("All seven checks passed.",terminal.getString("screen"))
                             val data=JSONObject().put("choices",JSONArray().put(JSONObject().put("finish_reason","stop").put(
                                 "message",JSONObject().put("content",content)))).toString().toByteArray()

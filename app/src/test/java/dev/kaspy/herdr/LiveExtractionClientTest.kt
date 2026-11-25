@@ -26,6 +26,29 @@ class LiveExtractionClientTest {
         assertEquals(LiveExtractionClient.Problem.CONTRACT,LiveExtractionClient.problem(422))
         assertEquals(LiveExtractionClient.Problem.UNAVAILABLE,LiveExtractionClient.problem(429))
     }
+    @Test fun distinguishesThinkingAndTokenLimitFromInvalidJson() {
+        fun envelope(finish:String,message:JSONObject)=JSONObject().put("choices",org.json.JSONArray()
+            .put(JSONObject().put("finish_reason",finish).put("message",message))).toString()
+        val partial=JSONObject().put("reasoning_content","considering the options").put("content","")
+        val length=assertThrows(LiveExtractionClient.Failure::class.java) {LiveExtractionClient.decode(envelope("length",partial))}
+        assertEquals(LiveExtractionClient.Problem.OUTPUT_LIMIT,length.problem)
+        val thinking=assertThrows(LiveExtractionClient.Failure::class.java) {LiveExtractionClient.decode(envelope("stop",partial))}
+        assertEquals(LiveExtractionClient.Problem.REASONING_ONLY,thinking.problem)
+        val valid=JSONObject().put("content","{\"kind\":\"none\"}").put("reasoning_content","separate")
+        assertEquals("none",LiveExtractionClient.decode(envelope("stop",valid)).getString("kind"))
+    }
+
+    @Test fun onlyAcceptsOneCompletePlainOrFencedObject() {
+        val fence=Char(96).toString().repeat(3)
+        val answer="""{"kind":"none"}"""
+        fun parse(content:String)=LiveExtractionClient.result(JSONObject().put("choices",org.json.JSONArray()
+            .put(JSONObject().put("finish_reason","stop").put("message",JSONObject().put("content",content)))).toString())
+        assertEquals("none",parse("${fence}json\n$answer\n$fence")?.getString("kind"))
+        assertNull(parse("$answer extra"))
+        assertNull(parse("This is the status: $answer"))
+        assertNull(parse(answer+"\n"+answer))
+    }
+
     @Test fun rejectsIncompleteAndToolResponse() {
         assertEquals("question",LiveExtractionClient.result(
             """{"choices":[{"finish_reason":"stop","message":{"content":"{\"kind\":\"question\"}"}}]}""")?.getString("kind"))

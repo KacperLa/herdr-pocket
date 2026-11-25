@@ -55,6 +55,20 @@ class LiveTurnExtractionTest {
         assertNull(report.draft)
     }
 
+    @Test fun readinessUsesCompactInputAndNeverTreatsUnknownAsReady()=runBlocking {
+        for (label in listOf("unknown","completion","none")) {
+            val extractor=LiveTurnExtraction { rules,input ->
+                assertEquals(LiveTurnExtraction.READINESS,rules)
+                assertEquals("agent screen",input.getString("screen"))
+                assertFalse(input.has("before"))
+                assertFalse(input.has("submitted"))
+                JSONObject().put("kind",label)
+            }
+            val result=extractor.inspect("same agent screen","agent screen","",false)
+            assertEquals(if(label=="none") LiveTurnExtraction.Kind.NONE else LiveTurnExtraction.Kind.UNKNOWN,result.kind)
+        }
+    }
+
     @Test fun unreadableResponseDoesNotBecomeAResult()=runBlocking {
         val extractor=LiveTurnExtraction { _,_-> null }
         assertEquals(LiveTurnExtraction.Kind.UNKNOWN,extractor.inspect("before","after","prompt",true).kind)
