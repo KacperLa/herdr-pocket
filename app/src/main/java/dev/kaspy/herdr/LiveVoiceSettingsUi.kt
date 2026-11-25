@@ -1,12 +1,20 @@
 package dev.kaspy.herdr
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.Checkbox
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.text.KeyboardOptions
@@ -83,6 +91,23 @@ internal fun LiveVoiceServiceSettings(voice:PocketLiveVoice) {
     voice.extractionCheckResult?.let {
         Text(it,modifier=Modifier.semantics {liveRegion=LiveRegionMode.Polite})
     }
+    var diagnosticReport by remember {mutableStateOf<String?>(null)}
+    TextButton(onClick={diagnosticReport=voice.diagnosticText()}) {Text("View diagnostics")}
+    diagnosticReport?.let { report ->
+        val context=LocalContext.current
+        PocketDialog(onDismissRequest={diagnosticReport=null},title={Text("Live Voice diagnostics")},
+            text={
+                Column(verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                    Text("Recent events from this app session. No API keys, server URLs, terminal text, or transcripts.")
+                    Text(report.ifEmpty {"No diagnostic events yet. Run the extraction test or try a call first."},
+                        modifier=Modifier.heightIn(max=280.dp).verticalScroll(rememberScrollState()),fontFamily=FontFamily.Monospace)
+                }
+            },
+            confirmButton={TextButton(enabled=report.isNotEmpty(),onClick={copyLiveDiagnostics(context,report)}) {
+                Text("Copy diagnostics")
+            }},
+            dismissButton={TextButton(onClick={diagnosticReport=null}) {Text("Close")}})
+    }
     if(voice.endpoint!=null) TextButton(onClick={voice.clearConfiguration()}) {Text("Remove Live Voice settings and keys")}
 }
 
@@ -134,7 +159,22 @@ internal fun LiveVoiceDialogs(voice:PocketLiveVoice) {
             dismissButton={TextButton(onClick=dismiss){Text("Skip")}})
     }
     voice.notice?.let { notice ->
+        val context=LocalContext.current
         PocketDialog(onDismissRequest=voice::dismissNotice,title={Text("Live Voice")},
-            text={Text(notice)},confirmButton={TextButton(onClick=voice::dismissNotice){Text("OK")}})
+            text={Text(notice)},confirmButton={TextButton(onClick=voice::dismissNotice){Text("OK")}},
+            dismissButton={
+                if(voice.diagnosticText().isNotEmpty()) TextButton(onClick={copyLiveDiagnostics(context,voice.diagnosticText())}) {
+                    Text("Copy diagnostics")
+                }
+            })
     }
+}
+
+private fun copyLiveDiagnostics(context:Context,report:String) {
+    if(report.isEmpty()) return
+    val copied=runCatching {
+        val clipboard=checkNotNull(context.getSystemService(ClipboardManager::class.java))
+        clipboard.setPrimaryClip(ClipData.newPlainText("Pocket Live Voice diagnostics",report))
+    }.isSuccess
+    if(!copied) Toast.makeText(context,"Could not copy diagnostics.",Toast.LENGTH_SHORT).show()
 }

@@ -132,3 +132,9 @@ sending it to the Live service. It does not answer a question, approve a
 request, or retry uncertain agent input automatically. If the response is
 ambiguous, stale, or truncated, check the terminal instead. Leaving the pane
 closes voice, but does not cancel agent work already submitted.
+
+
+After a failed test or call, open **Live Voice preview → View diagnostics →
+Copy diagnostics**. The recent log exists only in memory and contains
+allowlisted event names and counts, not URLs, keys, terminal text, transcripts
+or raw service responses.

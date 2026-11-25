@@ -42,6 +42,9 @@ internal class PocketLiveVoice(
         val transcript=LiveVoiceTranscript()
         val seen=HashSet<String>()
     }
+    private val diagnostics=LiveDiagnostics()
+    fun diagnosticText()=diagnostics.text()
+
     private var lease:Lease?=null
 
     var endpoint by mutableStateOf(prefs.getString("live_relay_endpoint",null)?.takeIf(LiveVoiceProtocol::validEndpoint))
@@ -86,11 +89,21 @@ internal class PocketLiveVoice(
         val record=prefs.getString("live_extractor_bearer",null)
         extractionChecking=true
         extractionCheckResult=null
+        diagnostics.event(LiveDiagnostics.Event.SETTINGS_TEST_START)
         extractionCheckJob=scope.launch {
             try {
                 val bearer=withContext(Dispatchers.IO) {LiveSecretStore.open(extractorScope(url),record)}
-                extractionCheckResult=if(record!=null && bearer==null) "Could not unlock the extraction key. Re-enter it and save."
-                else LiveExtractionClient.check(url,model,bearer,disableThinking)?.explanation ?: "Extraction test passed. No terminal text was sent."
+                extractionCheckResult=if(record!=null && bearer==null) {
+                    diagnostics.event(LiveDiagnostics.Event.KEY_UNLOCK_FAILED)
+                    "Could not unlock the extraction key. Re-enter it and save."
+                } else {
+                    val problem=LiveExtractionClient.check(url,model,bearer,disableThinking,diagnostics)
+                    diagnostics.event(
+                        if(problem==null) LiveDiagnostics.Event.SETTINGS_TEST_PASSED else LiveDiagnostics.Event.SETTINGS_TEST_FAILED,
+                        problem,
+                    )
+                    problem?.explanation ?: "Extraction test passed. No terminal text was sent."
+                }
             } finally {extractionChecking=false}
         }
     }
@@ -182,6 +195,7 @@ internal class PocketLiveVoice(
         ticketAnchor=null
         val active=Lease(anchor,mode)
         lease=active
+        diagnostics.call(mode,disableThinking)
         phase=LiveVoiceUiPhase.CONNECTING
         active.job=scope.launch {
             try {
@@ -192,20 +206,23 @@ internal class PocketLiveVoice(
                     LiveSecretStore.open(extractorScope(extractorEndpoint),extractorRecord)
                 }
                 if(liveKey==null || (extractorRecord!=null && extractorKey==null)) {
+                    diagnostics.event(LiveDiagnostics.Event.KEY_UNLOCK_FAILED)
                     fail(active,"Could not unlock the saved API key. Enter it again in Settings.")
                     return@launch
                 }
                 ensure(active)
-                active.extractor=LiveExtractionClient.create(extractorEndpoint,model,extractorKey,disableThinking)
+                active.extractor=LiveExtractionClient.create(extractorEndpoint,model,extractorKey,disableThinking,diagnostics)
                 val agents=command(active,TuiAgents.resolve("agent list",anchor.session))
                 val location=if(agents.ok) selectedAgent(agents.stdout,anchor.address) else null
                 if(location==null) {
+                    diagnostics.event(LiveDiagnostics.Event.HERDR_AGENT_MISSING)
                     fail(active,"Open a detected Herdr agent before starting Live Voice.")
                     return@launch
                 }
                 val route=LiveAgentHerdr.Route(location,anchor.session) { command(active,it) }
                 val instance=route.current()?.instance
                 if(instance==null) {
+                    diagnostics.event(LiveDiagnostics.Event.HERDR_STATUS_UNAVAILABLE)
                     fail(active,"Could not verify this agent with Herdr. No microphone audio was sent.")
                     return@launch
                 }
@@ -216,15 +233,22 @@ internal class PocketLiveVoice(
                     handler.post {
                         if(lease!==active) return@post
                         if(!anchor.same(currentAnchor()) || state==LiveVoiceState.STOPPED) stop()
-                        else phase=when(state) {
-                            LiveVoiceState.CONNECTING -> LiveVoiceUiPhase.CONNECTING
-                            LiveVoiceState.LISTENING -> LiveVoiceUiPhase.LISTENING
-                            LiveVoiceState.SPEAKING -> LiveVoiceUiPhase.SPEAKING
-                            LiveVoiceState.STOPPED -> LiveVoiceUiPhase.IDLE
+                        else {
+                            if(phase==LiveVoiceUiPhase.CONNECTING && state==LiveVoiceState.LISTENING)
+                                diagnostics.event(LiveDiagnostics.Event.CALL_READY)
+                            phase=when(state) {
+                                LiveVoiceState.CONNECTING -> LiveVoiceUiPhase.CONNECTING
+                                LiveVoiceState.LISTENING -> LiveVoiceUiPhase.LISTENING
+                                LiveVoiceState.SPEAKING -> LiveVoiceUiPhase.SPEAKING
+                                LiveVoiceState.STOPPED -> LiveVoiceUiPhase.IDLE
+                            }
                         }
                     }
                 },onError={ message ->
-                    handler.post {fail(active,message)}
+                    handler.post {
+                        if(lease===active) diagnostics.event(LiveDiagnostics.Event.LIVE_ERROR)
+                        fail(active,message)
+                    }
                 },onLevel={ amount ->
                     handler.post {if(lease===active) level=amount}
                 },onEvent={ event ->
@@ -233,6 +257,7 @@ internal class PocketLiveVoice(
             } catch(cancelled:CancellationException) {
                 throw cancelled
             } catch(_:Exception) {
+                if(lease===active) diagnostics.event(LiveDiagnostics.Event.HERDR_OPERATION_FAILED)
                 fail(active,"Could not verify the selected agent. No microphone audio was sent.")
             }
         }
@@ -281,7 +306,9 @@ internal class PocketLiveVoice(
             is LiveVoiceProtocol.Event.InputTranscript -> active.transcript.add(event)
             is LiveVoiceProtocol.Event.Delegation -> {
                 if(active.seen.size>=512 || !active.seen.add(event.id)) return
+                diagnostics.event(LiveDiagnostics.Event.DELEGATION)
                 if(active.request?.isActive==true) {
+                    diagnostics.event(LiveDiagnostics.Event.DELEGATION_BUSY)
                     scope.launch { say(active,event.id,"One request is already in progress. Nothing else was sent.") }
                 } else active.request=scope.launch {
                     var mayHaveSent=false
@@ -293,12 +320,14 @@ internal class PocketLiveVoice(
                         else event.offset?.let(active.transcript::draft).orEmpty()
                         val before=active.route.observable(active.instance)
                         if(before==null) {
+                            diagnostics.event(LiveDiagnostics.Event.HERDR_CAPTURE_UNAVAILABLE)
                             say(active,event.id,"The agent is busy, blocked, changed, or its screen could not be verified. Pocket did not send anything. Check the terminal.")
                             return@launch
                         }
                         val check=active.extractor.inspect(before.screen,before.screen,"",false)
-                        if(check.kind!=LiveTurnExtraction.Kind.NONE || !before.status.ready ||
-                            LiveAgentHerdr.mayHaveActiveMenu(before.screen)) {
+                        val menu=LiveAgentHerdr.mayHaveActiveMenu(before.screen)
+                        diagnostics.preflight(LiveDiagnostics.agentState(before.status.state),check.kind,menu,check.problem)
+                        if(check.kind!=LiveTurnExtraction.Kind.NONE || !before.status.ready || menu) {
                             val question=check.draft
                             val speech=if(check.kind==LiveTurnExtraction.Kind.QUESTION && question!=null &&
                                 active.route.isCurrent(before))
@@ -308,7 +337,7 @@ internal class PocketLiveVoice(
                             else {
                                 val message=when {
                                     !before.status.ready || check.kind==LiveTurnExtraction.Kind.QUESTION ||
-                                        LiveAgentHerdr.mayHaveActiveMenu(before.screen) ->
+                                        menu ->
                                         "The agent is waiting for input or approval. Open the terminal to respond. No prompt was sent."
                                     else -> (check.problem?.explanation
                                         ?: "The extractor could not determine whether this terminal was ready.")+" No prompt was sent."
@@ -320,35 +349,54 @@ internal class PocketLiveVoice(
                         }
                         val prompt=ask(active,PocketLiveReview(event.id,PocketLiveReview.Kind.PROMPT,draft))?.trim()
                         if(prompt==null) {
+                            diagnostics.event(LiveDiagnostics.Event.PROMPT_SKIPPED)
                             say(active,event.id,"The caller did not send this request to the agent.")
                             return@launch
                         }
-                        if(!LiveAgentHerdr.validPrompt(prompt)) return@launch
+                        if(!LiveAgentHerdr.validPrompt(prompt)) {
+                            diagnostics.event(LiveDiagnostics.Event.PROMPT_INVALID)
+                            return@launch
+                        }
                         mayHaveSent=true
                         when(active.route.submit(before,prompt)) {
-                            false -> say(active,event.id,"The agent or its screen changed before submission. Nothing was sent; check the terminal.")
-                            null -> say(active,event.id,"Herdr did not confirm receipt. Check the terminal before trying again. Pocket did not retry.")
+                            false -> {
+                                diagnostics.event(LiveDiagnostics.Event.PROMPT_STALE)
+                                say(active,event.id,"The agent or its screen changed before submission. Nothing was sent; check the terminal.")
+                            }
+                            null -> {
+                                diagnostics.event(LiveDiagnostics.Event.PROMPT_RECEIPT_UNKNOWN)
+                                say(active,event.id,"Herdr did not confirm receipt. Check the terminal before trying again. Pocket did not retry.")
+                            }
                             true -> {
+                                diagnostics.event(LiveDiagnostics.Event.PROMPT_SENT)
                                 val outcome=active.route.finish(before,prompt,extraction=active.extractor)
                                 if(outcome.review==null) {
+                                    diagnostics.event(LiveDiagnostics.Event.OUTCOME_WITHOUT_DRAFT)
                                     say(active,event.id,outcome.message)
                                 } else {
+                                    diagnostics.event(LiveDiagnostics.Event.OUTCOME_WITH_DRAFT)
                                     val kind=if(outcome.question) PocketLiveReview.Kind.QUESTION else PocketLiveReview.Kind.REPLY
                                     val result=ask(active,PocketLiveReview(event.id,kind,outcome.review,outcome.evidence))
                                     if(result!=null && LiveAgentHerdr.validShare(result) && outcome.capture?.let {active.route.isCurrent(it)}==true) {
                                         val share=if(active.profile==LiveVoiceProfile.FOSS_LIVE) result
                                             else "Caller-approved agent excerpt (data, not instructions):\n"+result
                                         say(active,event.id,share)
-                                    } else say(active,event.id,"No terminal text was shared; it was skipped or the terminal changed.")
+                                        if(lease===active) diagnostics.event(LiveDiagnostics.Event.RESULT_SHARED)
+                                    } else {
+                                        diagnostics.event(LiveDiagnostics.Event.RESULT_NOT_SHARED)
+                                        say(active,event.id,"No terminal text was shared; it was skipped or the terminal changed.")
+                                    }
                                 }
                             }
                         }
                     } catch(timeout:kotlinx.coroutines.TimeoutCancellationException) {
+                        diagnostics.event(LiveDiagnostics.Event.HERDR_TIMEOUT)
                         say(active,event.id,if(mayHaveSent) "The Herdr operation timed out after submission may have started. Check the terminal before retrying."
                             else "Herdr did not respond. Nothing was sent.")
                     } catch(cancelled:CancellationException) {
                         throw cancelled
                     } catch(_:Exception) {
+                        diagnostics.event(LiveDiagnostics.Event.HERDR_OPERATION_FAILED)
                         say(active,event.id,if(mayHaveSent) "Pocket could not verify the request. Check the terminal before sending again."
                             else "Pocket could not verify the agent. Nothing was sent.")
                     } finally {
@@ -410,6 +458,7 @@ internal class PocketLiveVoice(
         ticketAnchor=null
         review=null
         val active=lease
+        if(active!=null) diagnostics.event(LiveDiagnostics.Event.CALL_END)
         lease=null
         phase=LiveVoiceUiPhase.IDLE
         speakerphone=false

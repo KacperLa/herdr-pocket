@@ -123,13 +123,25 @@ class LiveVoiceWireTest {
                     assertTrue(LiveVoiceProtocol.parse(voice.read()!!) is LiveVoiceProtocol.Event.Audio)
                     assertEquals(LiveVoiceProtocol.Event.ClearAudio(2),LiveVoiceProtocol.parse(voice.read()!!))
                 }
-                val extraction=LiveExtractionClient.create("https://$base/v1/chat/completions","fixture-model","extraction-fixture",disableThinking=true)
+                val diagnostics=LiveDiagnostics()
+                val extraction=LiveExtractionClient.create("https://$base/v1/chat/completions","fixture-model","extraction-fixture",
+                    disableThinking=true,diagnostics=diagnostics)
                 val result=runBlocking {extraction.inspect("Previous reply","All seven checks passed.","Check unit tests",true)}
                 assertEquals("Seven checks passed.",result.draft)
                 assertNull(runBlocking {
-                    LiveExtractionClient.check("https://$base/v1/chat/completions","fixture-model","extraction-fixture",disableThinking=true)
+                    LiveExtractionClient.check("https://$base/v1/chat/completions","fixture-model","extraction-fixture",
+                        disableThinking=true,diagnostics=diagnostics)
                 })
                 serve.get(10,TimeUnit.SECONDS)
+                val report=diagnostics.text()
+                assertTrue(report.contains("origin=live_call stage=detect"))
+                assertTrue(report.contains("origin=live_call stage=completion"))
+                assertTrue(report.contains("origin=settings_test stage=readiness"))
+                assertTrue(report.contains("thinking_off_requested=true http=200"))
+                assertFalse(report.contains("extraction-fixture"))
+                assertFalse(report.contains("fixture-model"))
+                assertFalse(report.contains("localhost"))
+                assertFalse(report.contains("All seven checks passed."))
             }
         } finally {
             HttpsURLConnection.setDefaultSSLSocketFactory(defaultHttps)

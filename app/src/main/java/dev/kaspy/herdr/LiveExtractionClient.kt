@@ -32,8 +32,10 @@ internal object LiveExtractionClient {
         else -> Problem.CONTRACT
     }
 
-    suspend fun check(url:String,model:String,bearer:String?,disableThinking:Boolean=false):Problem? {
-        val extractor=create(url,model,bearer,disableThinking)
+    suspend fun check(
+        url:String,model:String,bearer:String?,disableThinking:Boolean=false,diagnostics:LiveDiagnostics?=null,
+    ):Problem? {
+        val extractor=LiveTurnExtraction(transport(url,model,bearer,disableThinking,diagnostics,LiveDiagnostics.Origin.SETTINGS_TEST))
         val idle="Codex · idle\n\n› Ask Codex to make a change"
         val observation=extractor.inspect("",idle,"",false)
         return if(observation.kind==LiveTurnExtraction.Kind.NONE) null
@@ -100,14 +102,23 @@ internal object LiveExtractionClient {
     private val FENCED=Regex("\\x60{3}(?:json)?[ \t]*\r?\n(.*?)\r?\n\\x60{3}",
         setOf(RegexOption.DOT_MATCHES_ALL,RegexOption.IGNORE_CASE))
 
-    fun create(url:String,model:String,bearer:String?,disableThinking:Boolean=false)=
-        LiveTurnExtraction(transport(url,model,bearer,disableThinking))
+    fun create(
+        url:String,model:String,bearer:String?,disableThinking:Boolean=false,diagnostics:LiveDiagnostics?=null,
+    )=LiveTurnExtraction(transport(url,model,bearer,disableThinking,diagnostics,LiveDiagnostics.Origin.LIVE_CALL))
 
-    private fun transport(url:String,model:String,bearer:String?,disableThinking:Boolean):suspend (String,JSONObject)->JSONObject {
+    private fun transport(
+        url:String,model:String,bearer:String?,disableThinking:Boolean,diagnostics:LiveDiagnostics?,
+        origin:LiveDiagnostics.Origin,
+    ):suspend (String,JSONObject)->JSONObject {
         val target=requireNotNull(endpoint(url))
         require(validModel(model) && (bearer==null || validKey(bearer)))
         return { instructions,input ->
             withContext(Dispatchers.IO) {
+                val start=System.nanoTime()
+                var status:Int?=null
+                var size:Int?=null
+                var reply:LiveDiagnostics.ReplyStats?=null
+                var failure:Problem?=null
                 try {
                     val connection=target.toURL().openConnection() as HttpsURLConnection
                     try {
@@ -122,15 +133,31 @@ internal object LiveExtractionClient {
                         val payload=body(model,instructions,input,disableThinking).toString().toByteArray(Charsets.UTF_8)
                         connection.setFixedLengthStreamingMode(payload.size)
                         try {connection.outputStream.use {it.write(payload)}} finally {payload.fill(0)}
-                        problem(connection.responseCode)?.let {throw Failure(it)}
+                        val httpCode=connection.responseCode
+                        status=httpCode
+                        problem(httpCode)?.let {throw Failure(it)}
                         val response=connection.inputStream.use {it.readNBytes(32_769)}
                         try {
+                            size=response.size
                             if(response.size>32_768) throw Failure(Problem.INVALID_REPLY)
-                            decode(response.toString(Charsets.UTF_8))
+                            val raw=response.toString(Charsets.UTF_8)
+                            if(diagnostics!=null) reply=LiveDiagnostics.summarize(raw)
+                            decode(raw)
                         } finally {response.fill(0)}
                     } finally {connection.disconnect()}
-                } catch(_:java.net.SocketTimeoutException) {throw Failure(Problem.TIMEOUT)}
-                catch(_:java.io.IOException) {throw Failure(Problem.CONNECTION)}
+                } catch(e:Failure) {
+                    failure=e.problem
+                    throw e
+                } catch(_:java.net.SocketTimeoutException) {
+                    failure=Problem.TIMEOUT
+                    throw Failure(Problem.TIMEOUT)
+                } catch(_:java.io.IOException) {
+                    failure=Problem.CONNECTION
+                    throw Failure(Problem.CONNECTION)
+                } finally {
+                    diagnostics?.extraction(origin,LiveTurnExtraction.diagnosticStage(instructions),
+                        disableThinking,status,size,(System.nanoTime()-start)/1_000_000,reply,failure)
+                }
             }
         }
     }
