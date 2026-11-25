@@ -114,7 +114,11 @@ and credentials. Saved credentials are encrypted with Android Keystore and
 bound to the configured endpoint. Editing a URL does not move its saved key
 to the new endpoint. Use **Test saved extraction** to check its URL, key and
 JSON mode with synthetic text before opening a call. The stock FOSS-Live
-server is the Live endpoint, not a Chat Completions endpoint.
+server is the Live endpoint, not a Chat Completions endpoint. For a compatible
+llama.cpp backend, **Disable thinking for extraction** requests no thinking
+for Pocket’s JSON requests only. Save the setting and rerun the test. Your
+gateway must forward the per-request fields and the backend must honor them;
+this does not change server defaults or the Live API.
 
 Open a recognized Herdr TUI agent and tap the waveform. The start dialog shows
 which service receives microphone audio and which receives visible terminal

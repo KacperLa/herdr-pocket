@@ -15,8 +15,8 @@ internal object LiveExtractionClient {
         CONTRACT("The extraction service rejected the request. Check the model name and Chat Completions JSON mode support."),
         UNAVAILABLE("The extraction service is unavailable or rate limited. Try again when it is ready."),
         INVALID_REPLY("The extraction model did not return the expected JSON response."),
-        OUTPUT_LIMIT("The extraction model hit its output limit before finishing. Try a non-thinking extraction model or disable thinking for this model on your server."),
-        REASONING_ONLY("The extraction model returned reasoning but no final JSON. Try a non-thinking extraction model or disable thinking on your server."),
+        OUTPUT_LIMIT("The extraction model hit its output limit before finishing. In Pocket, try Disable thinking for extraction. The gateway and model must honor the request."),
+        REASONING_ONLY("The extraction model returned reasoning but no final JSON. In Pocket, try Disable thinking for extraction. The gateway and model must honor the request."),
         TIMEOUT("The extraction service timed out."),
         CONNECTION("Pocket could not reach the extraction service over HTTPS."),
     }
@@ -32,8 +32,8 @@ internal object LiveExtractionClient {
         else -> Problem.CONTRACT
     }
 
-    suspend fun check(url:String,model:String,bearer:String?):Problem? {
-        val extractor=create(url,model,bearer)
+    suspend fun check(url:String,model:String,bearer:String?,disableThinking:Boolean=false):Problem? {
+        val extractor=create(url,model,bearer,disableThinking)
         val idle="Codex · idle\n\n› Ask Codex to make a change"
         val observation=extractor.inspect("",idle,"",false)
         return if(observation.kind==LiveTurnExtraction.Kind.NONE) null
@@ -52,10 +52,18 @@ internal object LiveExtractionClient {
     fun validModel(value:String)=value.length in 1..160 && value.all {it.code in 33..126}
     fun validKey(value:String)=value.length in 1..2048 && value.all {it.code in 33..126}
 
-    fun body(model:String,instructions:String,input:JSONObject):JSONObject {
+    fun body(model:String,instructions:String,input:JSONObject,disableThinking:Boolean=false):JSONObject {
         require(validModel(model))
         return JSONObject().put("model",model).put("stream",false).put("temperature",0)
             .put("max_tokens",1536).put("response_format",JSONObject().put("type","json_object"))
+            .apply {
+                if(disableThinking) {
+                    // llama.cpp supports a per-request off setting. The template flag
+                    // also covers compatible versions that use this legacy option.
+                    put("reasoning_effort","none")
+                    put("chat_template_kwargs",JSONObject().put("enable_thinking",false))
+                }
+            }
             .put("messages",JSONArray()
                 .put(JSONObject().put("role","system").put("content",instructions))
                 .put(JSONObject().put("role","user").put("content",input.toString())))
@@ -92,9 +100,10 @@ internal object LiveExtractionClient {
     private val FENCED=Regex("\\x60{3}(?:json)?[ \t]*\r?\n(.*?)\r?\n\\x60{3}",
         setOf(RegexOption.DOT_MATCHES_ALL,RegexOption.IGNORE_CASE))
 
-    fun create(url:String,model:String,bearer:String?)=LiveTurnExtraction(transport(url,model,bearer))
+    fun create(url:String,model:String,bearer:String?,disableThinking:Boolean=false)=
+        LiveTurnExtraction(transport(url,model,bearer,disableThinking))
 
-    private fun transport(url:String,model:String,bearer:String?):suspend (String,JSONObject)->JSONObject {
+    private fun transport(url:String,model:String,bearer:String?,disableThinking:Boolean):suspend (String,JSONObject)->JSONObject {
         val target=requireNotNull(endpoint(url))
         require(validModel(model) && (bearer==null || validKey(bearer)))
         return { instructions,input ->
@@ -110,7 +119,7 @@ internal object LiveExtractionClient {
                         connection.useCaches=false
                         connection.setRequestProperty("Content-Type","application/json")
                         bearer?.let {connection.setRequestProperty("Authorization","Bearer $it")}
-                        val payload=body(model,instructions,input).toString().toByteArray(Charsets.UTF_8)
+                        val payload=body(model,instructions,input,disableThinking).toString().toByteArray(Charsets.UTF_8)
                         connection.setFixedLengthStreamingMode(payload.size)
                         try {connection.outputStream.use {it.write(payload)}} finally {payload.fill(0)}
                         problem(connection.responseCode)?.let {throw Failure(it)}

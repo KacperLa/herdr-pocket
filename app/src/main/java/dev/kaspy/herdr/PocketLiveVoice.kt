@@ -67,6 +67,8 @@ internal class PocketLiveVoice(
         private set
     var extractorModel by mutableStateOf(prefs.getString("live_extractor_model","").orEmpty())
         private set
+    var disableExtractionThinking by mutableStateOf(prefs.getBoolean("live_extractor_disable_thinking",false))
+        private set
     var settingsSaved by mutableStateOf(false)
         private set
 
@@ -79,6 +81,7 @@ internal class PocketLiveVoice(
     fun testSavedExtraction() {
         val url=extractorUrl
         val model=extractorModel
+        val disableThinking=disableExtractionThinking
         if(extractionChecking || LiveExtractionClient.endpoint(url)==null || !LiveExtractionClient.validModel(model)) return
         val record=prefs.getString("live_extractor_bearer",null)
         extractionChecking=true
@@ -87,7 +90,7 @@ internal class PocketLiveVoice(
             try {
                 val bearer=withContext(Dispatchers.IO) {LiveSecretStore.open(extractorScope(url),record)}
                 extractionCheckResult=if(record!=null && bearer==null) "Could not unlock the extraction key. Re-enter it and save."
-                else LiveExtractionClient.check(url,model,bearer)?.explanation ?: "Extraction test passed. No terminal text was sent."
+                else LiveExtractionClient.check(url,model,bearer,disableThinking)?.explanation ?: "Extraction test passed. No terminal text was sent."
             } finally {extractionChecking=false}
         }
     }
@@ -102,7 +105,9 @@ internal class PocketLiveVoice(
     private fun voiceScope(profile:LiveVoiceProfile,url:String)="voice\n${profile.name}\n$url"
     private fun extractorScope(url:String)="extractor\n$url"
 
-    fun configure(profile:LiveVoiceProfile,url:String,key:String,extractor:String,model:String,extractorKey:String) {
+    fun configure(profile:LiveVoiceProfile,url:String,key:String,extractor:String,model:String,extractorKey:String,
+        disableThinking:Boolean,
+    ) {
         val normalized=LiveVoiceProtocol.normalizeEndpoint(url.trim()) ?: return
         if(LiveExtractionClient.endpoint(extractor)==null || !LiveExtractionClient.validModel(model)) return
         if(key.isNotEmpty() && !LiveExtractionClient.validKey(key) ||
@@ -121,12 +126,14 @@ internal class PocketLiveVoice(
         resetExtractionCheck()
         val saved=prefs.edit().putString("live_profile",profile.name).putString("live_relay_endpoint",normalized)
             .putString("live_bearer",actualKey).putString("live_extractor_endpoint",extractor)
-            .putString("live_extractor_model",model).putString("live_extractor_bearer",actualExtractor).commit()
+            .putString("live_extractor_model",model).putString("live_extractor_bearer",actualExtractor)
+            .putBoolean("live_extractor_disable_thinking",disableThinking).commit()
         if(!saved) {notice="Could not save Live Voice settings.";return}
         this.profile=profile
         endpoint=normalized
         extractorUrl=extractor
         extractorModel=model
+        disableExtractionThinking=disableThinking
         settingsSaved=true
     }
 
@@ -134,11 +141,13 @@ internal class PocketLiveVoice(
         stop()
         resetExtractionCheck()
         prefs.edit().remove("live_profile").remove("live_relay_endpoint").remove("live_bearer")
-            .remove("live_extractor_endpoint").remove("live_extractor_model").remove("live_extractor_bearer").commit()
+            .remove("live_extractor_endpoint").remove("live_extractor_model").remove("live_extractor_bearer")
+            .remove("live_extractor_disable_thinking").commit()
         profile=LiveVoiceProfile.RELAY_TICKET
         endpoint=null
         extractorUrl=""
         extractorModel=""
+        disableExtractionThinking=false
         settingsSaved=false
     }
 
@@ -165,6 +174,7 @@ internal class PocketLiveVoice(
         val mode=profile
         val extractorEndpoint=extractorUrl
         val model=extractorModel
+        val disableThinking=disableExtractionThinking
         val liveRecord=prefs.getString("live_bearer",null)
         val extractorRecord=prefs.getString("live_extractor_bearer",null)
         if(!anchor.same(currentAnchor()) || lease!=null ||
@@ -186,7 +196,7 @@ internal class PocketLiveVoice(
                     return@launch
                 }
                 ensure(active)
-                active.extractor=LiveExtractionClient.create(extractorEndpoint,model,extractorKey)
+                active.extractor=LiveExtractionClient.create(extractorEndpoint,model,extractorKey,disableThinking)
                 val agents=command(active,TuiAgents.resolve("agent list",anchor.session))
                 val location=if(agents.ok) selectedAgent(agents.stdout,anchor.address) else null
                 if(location==null) {

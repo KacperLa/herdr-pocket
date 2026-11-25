@@ -18,6 +18,16 @@ class LiveExtractionClientTest {
         assertNull(LiveExtractionClient.endpoint("http://example.test/chat/completions"))
         assertNull(LiveExtractionClient.endpoint("https://example.test/chat/completions?key=secret"))
     }
+    @Test fun thinkingFlagsAreExplicitAndOptIn() {
+        val data=JSONObject().put("screen","test")
+        val base=LiveExtractionClient.body("model","Return JSON.",data)
+        assertFalse(base.has("reasoning_effort"))
+        assertFalse(base.has("chat_template_kwargs"))
+        val off=LiveExtractionClient.body("model","Return JSON.",data,disableThinking=true)
+        assertEquals("none",off.getString("reasoning_effort"))
+        assertFalse(off.getJSONObject("chat_template_kwargs").getBoolean("enable_thinking"))
+        assertEquals("json_object",off.getJSONObject("response_format").getString("type"))
+    }
     @Test fun statusDiagnosticsDistinguishAuthRouteAndContract() {
         assertNull(LiveExtractionClient.problem(200))
         assertEquals(LiveExtractionClient.Problem.AUTH,LiveExtractionClient.problem(401))

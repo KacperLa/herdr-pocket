@@ -2,6 +2,12 @@ package dev.kaspy.herdr
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.material3.Checkbox
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.OutlinedTextField
@@ -28,6 +34,7 @@ internal fun LiveVoiceServiceSettings(voice:PocketLiveVoice) {
     var extractor by remember(voice.extractorUrl) {mutableStateOf(voice.extractorUrl)}
     var model by remember(voice.extractorModel) {mutableStateOf(voice.extractorModel)}
     var extractorKey by remember(voice.extractorUrl) {mutableStateOf("")}
+    var disableThinking by remember(voice.disableExtractionThinking) {mutableStateOf(voice.disableExtractionThinking)}
     Text("Choose a trusted Live service. For an OpenAI-backed service, keep the OpenAI project key on your proxy and use its client key here.")
     for (option in LiveVoiceProfile.entries) {
         TextButton(onClick={profile=option;key=""},enabled=profile!=option) {Text(when(option) {
@@ -51,14 +58,25 @@ internal fun LiveVoiceServiceSettings(voice:PocketLiveVoice) {
     OutlinedTextField(value=extractorKey,onValueChange={extractorKey=it.take(2048)},singleLine=true,
         label={Text("Extraction API key (if required)")},visualTransformation=PasswordVisualTransformation(),
         keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Password),modifier=Modifier.fillMaxWidth())
+    Row(Modifier.fillMaxWidth().heightIn(min=48.dp)
+        .toggleable(disableThinking,role=Role.Checkbox,onValueChange={disableThinking=it}),
+        verticalAlignment=Alignment.CenterVertically,
+        horizontalArrangement=Arrangement.spacedBy(10.dp),
+    ) {
+        Checkbox(checked=disableThinking,onCheckedChange=null)
+        Column {
+            Text("Disable thinking for extraction")
+            Text("For llama.cpp-compatible servers. Affects only Pocket’s extraction requests.")
+        }
+    }
     if(voice.settingsSaved) Text("Live Voice settings saved. Blank key fields keep the saved keys when their URLs are unchanged.")
     TextButton(onClick={
-        voice.configure(profile,endpoint.trim(),key.trim(),extractor.trim(),model.trim(),extractorKey.trim())
+        voice.configure(profile,endpoint.trim(),key.trim(),extractor.trim(),model.trim(),extractorKey.trim(),disableThinking)
         key="";extractorKey=""
     },enabled=LiveVoiceProtocol.normalizeEndpoint(endpoint.trim())!=null &&
         LiveExtractionClient.endpoint(extractor.trim())!=null && LiveExtractionClient.validModel(model.trim())) {Text("Save Live Voice settings")}
     val extractionMatchesSaved=extractor.trim()==voice.extractorUrl && model.trim()==voice.extractorModel &&
-        extractorKey.isEmpty() && voice.extractorUrl.isNotEmpty()
+        extractorKey.isEmpty() && voice.extractorUrl.isNotEmpty() && disableThinking==voice.disableExtractionThinking
     TextButton(onClick=voice::testSavedExtraction,enabled=extractionMatchesSaved && !voice.extractionChecking) {
         Text(if(voice.extractionChecking) "Testing extraction…" else "Test saved extraction")
     }

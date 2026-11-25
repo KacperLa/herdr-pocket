@@ -88,6 +88,8 @@ class LiveVoiceWireTest {
                             val length=headers.first {it.startsWith("Content-Length: ",true)}.substringAfter(": ").toInt()
                             val message=JSONObject(input.readNBytes(length).decodeToString())
                             assertEquals("fixture-model",message.getString("model"))
+                            assertEquals("none",message.getString("reasoning_effort"))
+                            assertFalse(message.getJSONObject("chat_template_kwargs").getBoolean("enable_thinking"))
                             assertFalse(message.has("tools"))
                             val terminal=JSONObject(message.getJSONArray("messages").getJSONObject(1).getString("content"))
                             if(content=="""{"kind":"none"}""") {
@@ -121,11 +123,11 @@ class LiveVoiceWireTest {
                     assertTrue(LiveVoiceProtocol.parse(voice.read()!!) is LiveVoiceProtocol.Event.Audio)
                     assertEquals(LiveVoiceProtocol.Event.ClearAudio(2),LiveVoiceProtocol.parse(voice.read()!!))
                 }
-                val extraction=LiveExtractionClient.create("https://$base/v1/chat/completions","fixture-model","extraction-fixture")
+                val extraction=LiveExtractionClient.create("https://$base/v1/chat/completions","fixture-model","extraction-fixture",disableThinking=true)
                 val result=runBlocking {extraction.inspect("Previous reply","All seven checks passed.","Check unit tests",true)}
                 assertEquals("Seven checks passed.",result.draft)
                 assertNull(runBlocking {
-                    LiveExtractionClient.check("https://$base/v1/chat/completions","fixture-model","extraction-fixture")
+                    LiveExtractionClient.check("https://$base/v1/chat/completions","fixture-model","extraction-fixture",disableThinking=true)
                 })
                 serve.get(10,TimeUnit.SECONDS)
             }
