@@ -239,7 +239,7 @@ fun main() {
         check(ssh.sendToTerminal(tuiTerminal,"still at shell".toByteArray()))
         expectText("shell active while browsing")
         val shellFolder=sftpResult() as SftpRead.Folder
-        check(shellFolder.root==shellRoot.path && shellFolder.entries.map { it.name }==listOf("keep-folder","ambiguous-delete.bin","capture.bin","delete [1]*?.bin","delete [1]abcX.bin","escape-link","full-source.txt","inside.txt","slow.bin"))
+        check(shellFolder.root==shellRoot.path && shellFolder.entries.map { it.name }==listOf("empty [1]*?","empty [1]neighbor","keep-folder","rmdir-race","ambiguous-delete.bin","capture.bin","delete [1]*?.bin","delete [1]abcX.bin","escape-link","folder-link","full-source.txt","inside.txt","slow.bin"))
         check(ssh.terminalIdentity()===tuiTerminal)
         val downloads=LinkedBlockingQueue<SftpDownload>()
         val complete=File.createTempFile("outside-preview",".tmp",File("."))
