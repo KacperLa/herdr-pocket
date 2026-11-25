@@ -165,7 +165,7 @@ fun main() {
         val existing=checkNotNull(tuiAgent.tuiLocation)
         check(TuiMutations.confirmsPane(rpc(TuiMutations.inspectPane(existing,"office")),existing))
         check(TuiMutations.confirmsPane(rpc(TuiMutations.renamePane(existing,"Jetson AI 2","office")),existing,"Jetson AI 2"))
-        val fresh=checkNotNull(TuiMutations.newPane(rpc(TuiMutations.createShellTab(existing.workspaceId,"office")),existing.workspaceId))
+        val fresh=checkNotNull(TuiMutations.newShellPane(rpc(TuiMutations.createShellTab(existing.workspaceId,"office")),existing.workspaceId))
         check(fresh.terminalId!=existing.terminalId && fresh.paneId!=existing.paneId)
         check(TuiMutations.confirmsPane(rpc(TuiMutations.inspectPane(fresh,"office")),fresh))
         val freshShell=TuiAgents.plainTerminal(fresh)

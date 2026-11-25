@@ -138,7 +138,7 @@ import androidx.compose.ui.unit.sp
             horizontalArrangement=Arrangement.spacedBy(14.dp),
         ) {
             if(session.isAgent && (compactAgent || spacesMode))
-                AgentFaceAvatar(avatarScope,session.address,avatarStatus,statusLabel.takeIf {compactAgent})
+                AgentFaceAvatar(avatarScope,session.address,avatarStatus,statusLabel)
             else if(session.isAgent) AgentStatusAvatar(avatarStatus)
             else TerminalAvatar()
             Column(
@@ -160,10 +160,9 @@ import androidx.compose.ui.unit.sp
                         // Text semantics retain the entire line, even when visually ellipsized.
                         Text(it,fontSize=15.sp,color=secondary,maxLines=1,overflow=TextOverflow.Ellipsis)
                     }
-                    if(spacesMode) Text(statusLabel,fontSize=15.sp,fontWeight=FontWeight.Medium)
                 } else {
                     Text(name,fontSize=22.sp,fontWeight=FontWeight.SemiBold,maxLines=2,overflow=TextOverflow.Ellipsis)
-                    Text(stateAndRunner,fontSize=15.sp,fontWeight=FontWeight.Medium)
+                    if(!spacesMode) Text(stateAndRunner,fontSize=15.sp,fontWeight=FontWeight.Medium)
                     val metadata=if(tui) breadcrumb.ifBlank {null} else session.address
                     metadata?.let { Text(it,fontSize=15.sp,color=scheme.onSurfaceVariant,
                         maxLines=2,overflow=TextOverflow.Ellipsis) }
