@@ -153,7 +153,7 @@ fun main() {
         check(coreShell.address=="t9" && !coreShell.isAgent)
         val (tuiAgents,tuiShells)=groupedLiveRoster(TuiAgents.parse(rpc(TuiAgents.listCommand("office"))))
         val tuiAgent=tuiAgents.single()
-        check(tuiAgent.name=="Jetson AI" && tuiAgent.address=="term_busy")
+        check(tuiAgent.name=="Codex 1" && tuiAgent.address=="term_busy")
         check(tuiShells.single().address=="term_shell")
         val tuiBusyId=checkNotNull(ssh.switchPty(AgentBackend.TUI.switchCommand(tuiAgent.address,"office"),tui=true))
         val tuiBusy=event() as SshSession.Event.OperationFailed

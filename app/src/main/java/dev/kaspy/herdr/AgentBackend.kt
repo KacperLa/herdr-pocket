@@ -118,12 +118,12 @@ internal object TuiAgents {
             fun display(key:String,limit:Int=120):String? = displayText(item.opt(key),limit)
             val provider=display("agent")
             val runner=runnerName(provider)
-            // Agent names and manual pane labels are separate fields on Herdr.
+            // A custom tab label wins. On an unnamed tab, combine the agent's
+            // name or runner with Herdr's tab position, never a pane/workspace title.
             val location=TuiLocation.from(item,address)
             val registeredName=display("name")
-            val paneLabel=labels.paneLabel(item,address)
-            val explicitName=registeredName ?: paneLabel
-            val name=explicitName ?: labels.parentLabel(item) ?: runner?.let {"$it agent"} ?: "Unnamed agent"
+            val placement=labels.placement(location)
+            val name=labels.agentTitle(location,registeredName ?: runner ?: "Agent")
             val descriptions=listOf(
                 display("title",480),
                 display("terminal_title_stripped",480),
@@ -135,7 +135,6 @@ internal object TuiAgents {
                     !value.equals(runner,ignoreCase=true)
             }
             val description=descriptions.firstOrNull()
-            val placement=labels.placement(location)
             val compactDescription=descriptions.firstNotNullOfOrNull { value ->
                 agentCardDescription(value,placement?.workspaceLabel,name)?.takeUnless {
                     it.equals(provider,ignoreCase=true) || it.equals(runner,ignoreCase=true)
@@ -144,8 +143,7 @@ internal object TuiAgents {
             val path=display("cwd",1024) ?: display("foreground_cwd",1024)
             CoreSession(address,name,"live",runner.orEmpty(),display("agent_status"),description,path,location,isAgent=true,
                 rosterPlacement=placement,attentionRecency=reportedSequence(item.opt("state_change_seq")),
-                spacesName=labels.spacesName(location, paneLabel ?: registeredName, display("title",480) ?: display("terminal_title_stripped",480),
-                    provider ?: display("display_agent")),
+                spacesName=name,
                 spacesPath=labels.foregroundPath(location) ?: display("foreground_cwd",1024) ?: path,
                 compactDescription=compactDescription,tuiAgentName=registeredName)
         }
@@ -220,8 +218,25 @@ internal object TuiAgents {
         private fun tab(location:TuiLocation):JSONObject? =
             tabById[location.tabId]?.takeIf {id(it,"workspace_id")==location.workspaceId}
 
-        private fun tabLabel(location:TuiLocation):String? = displayText(tab(location)?.opt("label"),120)
+        private fun reportedTabLabel(location:TuiLocation):String? = displayText(tab(location)?.opt("label"),120)
+
+        private fun tabLabel(location:TuiLocation):String? = reportedTabLabel(location)
             ?: tabOrder[location.workspaceId]?.get(location.tabId)?.let {(it+1).toString()}
+
+        fun agentTitle(location:TuiLocation?,agentName:String):String {
+            location ?: return agentName
+            val record=tab(location)
+            val label=reportedTabLabel(location)
+            val position=tabOrder[location.workspaceId]?.get(location.tabId)?.plus(1)?.toString()
+            val custom=record?.opt("custom_label") as? Boolean
+            // Stable Herdr exposes the display label and tab order, but not always
+            // the custom flag. A label unequal to the positional default is custom.
+            if(label!=null && (custom==true ||
+                    custom==null && (label.toULongOrNull()==null || position!=null && label!=position)))
+                return label
+            val number=label?.takeIf {it.toULongOrNull()?.let {n -> n>0uL}==true} ?: position
+            return if(number==null) agentName else "$agentName $number"
+        }
 
         private fun paneOrdinal(location:TuiLocation):Int? =
             paneOrder[location.workspaceId to location.tabId]?.takeIf {it.size>1}?.get(location)?.plus(1)
@@ -253,17 +268,6 @@ internal object TuiAgents {
         private val workspaceAutomaticLabels=paneById.values.groupBy {id(it,"workspace_id")}.mapValues {(_,items) ->
             items.asSequence().flatMap {sequenceOf(it.opt("cwd"),it.opt("foreground_cwd"))}
                 .mapNotNull {displayText(it,1024)}.flatMap(::pathLabels).toSet()
-        }
-
-        fun paneLabel(agent:JSONObject,terminalId:String):String? {
-            val paneId=id(agent,"pane_id")
-            val tabId=id(agent,"tab_id")
-            val workspaceId=id(agent,"workspace_id")
-            if(paneId!=null && tabId!=null && workspaceId!=null) {
-                paneById[paneId]?.takeIf {id(it,"terminal_id")==terminalId && id(it,"tab_id")==tabId &&
-                    id(it,"workspace_id")==workspaceId}?.let {displayText(it.opt("label"),120)}?.let {return it}
-            }
-            return null
         }
 
         fun parentLabel(agent:JSONObject):String? {
