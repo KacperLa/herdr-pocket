@@ -138,3 +138,9 @@ After a failed test or call, open **Live Voice preview → View diagnostics →
 Copy diagnostics**. The recent log exists only in memory and contains
 allowlisted event names and counts, not URLs, keys, terminal text, transcripts
 or raw service responses.
+
+
+The call-start dialog's **Ignore bottom lines** option hides the selected
+number of captured rows from extraction for this pane. Pocket remembers the
+count per pane and still checks the original terminal for approval menus and
+screen changes before any prompt is submitted.

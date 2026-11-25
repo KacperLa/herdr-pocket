@@ -522,8 +522,11 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
             val target=resume?.takeIf {it.backend==AgentBackend.TUI}
             val address=activeCoreAddress
             val pty=speechTerminalIdentity()
-            if(target!=null && address!=null && target.address==address && pty!=null && !agentMenuOpen && filesUi==null)
-                TuiLiveAnchor(pty,address,target.tuiSession) else null
+            val hostScope=target?.let {AgentPinScope.from(it.config,it.backend,it.tuiSession)}
+            if(target!=null && address!=null && target.address==address && pty!=null && hostScope!=null &&
+                !agentMenuOpen && filesUi==null)
+                TuiLiveAnchor(pty,address,target.tuiSession,LiveExtractionWindow.preferenceKey(hostScope,address))
+            else null
         }
     }
 

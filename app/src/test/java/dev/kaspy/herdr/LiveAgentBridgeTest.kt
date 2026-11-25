@@ -137,6 +137,48 @@ class LiveAgentBridgeTest {
         }
     }
 
+    @Test fun cropDoesNotHideApprovalOrStaleTextFromTheLocalGuard()=runBlocking {
+        val idle=status("idle",10)
+        val identity=LiveAgentHerdr.status(idle,selected)!!
+        val raw="Visible historical text\nAllow once\nFooter"
+        val before=LiveAgentHerdr.Capture(identity,raw)
+        val extractor=LiveTurnExtraction { _,input ->
+            assertEquals("Visible historical text",input.getString("screen"))
+            org.json.JSONObject("""{"kind":"none"}""")
+        }
+        assertEquals(LiveTurnExtraction.Kind.NONE,LiveAgentHerdr.preflight(before,extractor,2).kind)
+        val (withMenu,menuCommands)=fixture(idle,text(raw),idle)
+        assertEquals(false,withMenu.submit(before,"Only review this"))
+        assertTrue(menuCommands.none {"agent prompt" in it})
+
+        val okay=LiveAgentHerdr.Capture(identity,"Visible historical text\nEmpty editor\nOld Footer")
+        val (changed,changedCommands)=fixture(idle,text("Visible historical text\nEmpty editor\nNew Footer"),idle)
+        assertEquals(false,changed.submit(okay,"Only review this"))
+        assertTrue(changedCommands.none {"agent prompt" in it})
+
+        val noCall=LiveTurnExtraction { _,_->error("never send an empty crop") }
+        assertEquals(LiveTurnExtraction.Kind.UNKNOWN,LiveAgentHerdr.preflight(before,noCall,20).kind)
+    }
+
+    @Test fun settledCompletionUsesTheSameCropForBothSnapshots()=runBlocking {
+        val idle=status("idle",10)
+        val done=status("done",12)
+        val screen="A fresh complete response.\nEditor to ignore\nStatus footer"
+        val (route,_)=fixture(status("working",11),
+            done,text(screen),done,done,text(screen),done,text(screen),done)
+        val before=LiveAgentHerdr.Capture(LiveAgentHerdr.status(idle,selected)!!,"Old response.\nEditor to ignore\nStatus footer")
+        val extractor=LiveTurnExtraction { rules,input ->
+            assertEquals("Old response.",input.getString("before"))
+            assertEquals("A fresh complete response.",input.getString("screen"))
+            org.json.JSONObject(if(rules.contains("verbatim quote"))
+                """{"speech":"It finished.","evidence":"A fresh complete response."}""" else """{"kind":"completion"}""")
+        }
+        var time=0L
+        val result=route.finish(before,"Check this",attempts=3,pause={time+=2_000},nowMs={time},extraction=extractor,ignoreBottomLines=2)
+        assertEquals("It finished.",result.review)
+        assertEquals(screen,result.capture?.screen)
+    }
+
     @Test fun outputsAreUtf8BoundedAndTranscriptMetadataIsNotACommand() {
         val b=LiveVoiceTranscript()
         b.add(LiveVoiceProtocol.Event.InputTranscript("one","Check",100,200))

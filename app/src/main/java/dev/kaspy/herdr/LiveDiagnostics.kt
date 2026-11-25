@@ -33,8 +33,9 @@ internal class LiveDiagnostics(private val clock:()->Long={System.nanoTime()/1_0
     @Synchronized fun event(event:Event,problem:LiveExtractionClient.Problem?=null) =
         append(event.label(),problem?.let {"problem="+it.label()})
 
-    @Synchronized fun call(profile:LiveVoiceProfile,disableThinking:Boolean)=
-        append(Event.CALL_START.label(),"profile="+profile.label(),"thinking_off_requested=$disableThinking")
+    @Synchronized fun call(profile:LiveVoiceProfile,disableThinking:Boolean,ignoreBottomLines:Int=0)=
+        append(Event.CALL_START.label(),"profile="+profile.label(),"thinking_off_requested=$disableThinking",
+            "ignore_bottom_lines="+LiveExtractionWindow.normalize(ignoreBottomLines))
 
     @Synchronized fun preflight(
         state:AgentState,kind:LiveTurnExtraction.Kind,menu:Boolean,problem:LiveExtractionClient.Problem?,

@@ -20,8 +20,9 @@ import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import java.io.IOException
 
-internal data class TuiLiveAnchor(val pty:Any,val address:String,val session:String?) {
-    fun same(other:TuiLiveAnchor?)=other!=null && other.pty===pty && other.address==address && other.session==session
+internal data class TuiLiveAnchor(val pty:Any,val address:String,val session:String?,val trimPreference:String) {
+    fun same(other:TuiLiveAnchor?)=other!=null && other.pty===pty && other.address==address &&
+        other.session==session && other.trimPreference==trimPreference
 }
 
 /** Main thread owns leases, SSH operation IDs and review decisions. */
@@ -30,7 +31,7 @@ internal class PocketLiveVoice(
     private val currentAnchor:()->TuiLiveAnchor?,
 ) {
     private val handler=Handler(Looper.getMainLooper())
-    private data class Lease(val anchor:TuiLiveAnchor,val profile:LiveVoiceProfile) {
+    private data class Lease(val anchor:TuiLiveAnchor,val profile:LiveVoiceProfile,val ignoreBottomLines:Int) {
         var engine:LiveVoiceEngine?=null
         var job:Job?=null
         var request:Job?=null
@@ -181,7 +182,10 @@ internal class PocketLiveVoice(
 
     fun cancelTicket() {ticketAnchor=null}
 
-    fun start(ticket:String) {
+    fun savedIgnoreBottomLines(anchor:TuiLiveAnchor)=
+        LiveExtractionWindow.normalize(prefs.getInt(anchor.trimPreference,0))
+
+    fun start(ticket:String,ignoreBottomLines:Int) {
         val anchor=ticketAnchor ?: return
         val relay=endpoint ?: return
         val mode=profile
@@ -192,10 +196,14 @@ internal class PocketLiveVoice(
         val extractorRecord=prefs.getString("live_extractor_bearer",null)
         if(!anchor.same(currentAnchor()) || lease!=null ||
             (mode==LiveVoiceProfile.RELAY_TICKET && !LiveVoiceProtocol.validTicket(ticket))) return
+        val bottom=LiveExtractionWindow.normalize(ignoreBottomLines)
+        if(bottom!=savedIgnoreBottomLines(anchor)) {
+            prefs.edit().let {if(bottom==0) it.remove(anchor.trimPreference) else it.putInt(anchor.trimPreference,bottom)}.apply()
+        }
         ticketAnchor=null
-        val active=Lease(anchor,mode)
+        val active=Lease(anchor,mode,bottom)
         lease=active
-        diagnostics.call(mode,disableThinking)
+        diagnostics.call(mode,disableThinking,bottom)
         phase=LiveVoiceUiPhase.CONNECTING
         active.job=scope.launch {
             try {
@@ -324,8 +332,8 @@ internal class PocketLiveVoice(
                             say(active,event.id,"The agent is busy, blocked, changed, or its screen could not be verified. Pocket did not send anything. Check the terminal.")
                             return@launch
                         }
-                        val knownComposer=LiveAgentHerdr.codexScrolledEmptyComposer(before)
-                        val check=LiveAgentHerdr.preflight(before,active.extractor)
+                        val knownComposer=active.ignoreBottomLines==0 && LiveAgentHerdr.codexScrolledEmptyComposer(before)
+                        val check=LiveAgentHerdr.preflight(before,active.extractor,active.ignoreBottomLines)
                         val menu=LiveAgentHerdr.mayHaveActiveMenu(before.screen)
                         diagnostics.preflight(LiveDiagnostics.agentState(before.status.state),check.kind,menu,check.problem,knownComposer)
                         if(check.kind!=LiveTurnExtraction.Kind.NONE || !before.status.ready || menu) {
@@ -340,6 +348,9 @@ internal class PocketLiveVoice(
                                     !before.status.ready || check.kind==LiveTurnExtraction.Kind.QUESTION ||
                                         menu ->
                                         "The agent is waiting for input or approval. Open the terminal to respond. No prompt was sent."
+                                    active.ignoreBottomLines>0 &&
+                                        LiveExtractionWindow.crop(before.screen,active.ignoreBottomLines).isBlank() ->
+                                        "The crop left no text for the extractor. Start a new call with fewer ignored lines. No prompt was sent."
                                     else -> (check.problem?.explanation
                                         ?: "The extractor could not determine whether this terminal was ready.")+" No prompt was sent."
                                 }
@@ -370,7 +381,8 @@ internal class PocketLiveVoice(
                             }
                             true -> {
                                 diagnostics.event(LiveDiagnostics.Event.PROMPT_SENT)
-                                val outcome=active.route.finish(before,prompt,extraction=active.extractor)
+                                val outcome=active.route.finish(before,prompt,extraction=active.extractor,
+                                    ignoreBottomLines=active.ignoreBottomLines)
                                 if(outcome.review==null) {
                                     diagnostics.event(LiveDiagnostics.Event.OUTCOME_WITHOUT_DRAFT)
                                     say(active,event.id,outcome.message)

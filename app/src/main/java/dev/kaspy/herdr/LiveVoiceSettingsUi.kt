@@ -115,20 +115,27 @@ internal fun LiveVoiceServiceSettings(voice:PocketLiveVoice) {
 internal fun LiveVoiceDialogs(voice:PocketLiveVoice) {
     voice.ticketAnchor?.let {anchor ->
         var ticket by remember(anchor) {mutableStateOf("")}
+        var bottomLines by remember(anchor) {mutableStateOf(voice.savedIgnoreBottomLines(anchor).toString())}
+        val bottom=bottomLines.toIntOrNull()?.takeIf {it in 0..LiveExtractionWindow.MAX_IGNORED_LINES}
         PocketDialog(onDismissRequest=voice::cancelTicket,title={Text("Start Live Voice?")},
             text={
-                Column(verticalArrangement=Arrangement.spacedBy(10.dp)) {
+                Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(10.dp)) {
                     Text("Microphone audio goes to your Live endpoint. The extraction service receives visible terminal snapshots to check for questions and replies. Pocket asks before submitting an agent prompt or sharing a speech draft.")
                     Text("Live: "+(voice.endpoint.orEmpty()))
                     Text("Extraction: "+voice.extractorUrl)
+                    OutlinedTextField(value=bottomLines,onValueChange={ value ->
+                        if(value.length<=2 && value.all {it in '0'..'9'}) bottomLines=value
+                    },label={Text("Ignore bottom lines")},singleLine=true,isError=bottomLines.isNotEmpty() && bottom==null,
+                        supportingText={Text("0–${LiveExtractionWindow.MAX_IGNORED_LINES}. Saved for this pane when you start. Only crops what the extractor sees.")},
+                        keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth())
                     if(voice.profile==LiveVoiceProfile.RELAY_TICKET) OutlinedTextField(value=ticket,onValueChange={ticket=it.take(160)},
                         label={Text("One-time relay ticket")},singleLine=true,
                         keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Password),
                         visualTransformation=PasswordVisualTransformation(),modifier=Modifier.fillMaxWidth())
                 }
             },
-            confirmButton={TextButton(onClick={val submitted=ticket.trim();ticket="";voice.start(submitted)},
-                enabled=voice.profile!=LiveVoiceProfile.RELAY_TICKET || LiveVoiceProtocol.validTicket(ticket.trim())) {Text("Start call")}},
+            confirmButton={TextButton(onClick={val submitted=ticket.trim();ticket="";bottom?.let {voice.start(submitted,it)}},
+                enabled=bottom!=null && (voice.profile!=LiveVoiceProfile.RELAY_TICKET || LiveVoiceProtocol.validTicket(ticket.trim()))) {Text("Start call")}},
             dismissButton={TextButton(onClick=voice::cancelTicket){Text("Cancel")}})
     }
     voice.review?.let {review ->

@@ -68,9 +68,16 @@ internal object LiveAgentHerdr {
             tail[3].substringAfter("Earlier messages available.").trim().startsWith("enter/esc latest")
     }
 
-    suspend fun preflight(capture:Capture,extractor:LiveTurnExtraction):LiveTurnExtraction.Observation =
-        if(codexScrolledEmptyComposer(capture)) LiveTurnExtraction.Observation(LiveTurnExtraction.Kind.NONE)
-        else extractor.inspect(capture.screen,capture.screen,"",false)
+    suspend fun preflight(
+        capture:Capture,extractor:LiveTurnExtraction,ignoreBottomLines:Int=0,
+    ):LiveTurnExtraction.Observation {
+        if(ignoreBottomLines==0 && codexScrolledEmptyComposer(capture))
+            return LiveTurnExtraction.Observation(LiveTurnExtraction.Kind.NONE)
+        val visible=LiveExtractionWindow.crop(capture.screen,ignoreBottomLines)
+        return if(ignoreBottomLines>0 && visible.isBlank())
+            LiveTurnExtraction.Observation(LiveTurnExtraction.Kind.UNKNOWN)
+        else extractor.inspect(visible,visible,"",false)
+    }
 
 
     /**
@@ -147,6 +154,7 @@ internal object LiveAgentHerdr {
             attempts:Int=180,pause:suspend ()->Unit={delay(620)},
             nowMs:()->Long={System.nanoTime()/1_000_000},
             extraction:LiveTurnExtraction?=null,
+            ignoreBottomLines:Int=0,
         ):Result {
             var working=false
             var candidate:Capture?=null
@@ -172,7 +180,11 @@ internal object LiveAgentHerdr {
                         candidateSince=now
                     } else if(settled!=null && now-candidateSince>=2000) {
                         if(extraction!=null) {
-                            val observed=extraction.inspect(before.screen,settled.screen,text,completed)
+                            val afterVisible=LiveExtractionWindow.crop(settled.screen,ignoreBottomLines)
+                            val beforeVisible=LiveExtractionWindow.crop(before.screen,ignoreBottomLines)
+                            val observed=if(ignoreBottomLines>0 && afterVisible.isBlank())
+                                LiveTurnExtraction.Observation(LiveTurnExtraction.Kind.UNKNOWN)
+                            else extraction.inspect(beforeVisible,afterVisible,text,completed)
                             if(!isCurrent(settled)) {
                                 candidate=null
                                 return@repeat
