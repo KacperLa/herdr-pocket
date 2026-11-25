@@ -87,6 +87,31 @@ class TerminalDictationTextTest {
         assertNull(TerminalDictationTicket(original).finish(replacement, listOf("wrong channel")))
     }
 
+    @Test fun aHoldRequiresReleaseOnTheSameResumedTerminal() {
+        val original = Any()
+        val replacement = Any()
+        val ticket = TerminalDictationTicket(original, holdToTalk = true)
+        assertFalse(ticket.releaseHold(original, resumed = true))
+        assertTrue(ticket.claimStart(original, resumed = true))
+        assertNull(ticket.finish(original, listOf("do not send while still held")))
+        assertFalse(ticket.releaseHold(original, resumed = false))
+        assertFalse(ticket.releaseHold(replacement, resumed = true))
+        assertTrue(ticket.releaseHold(original, resumed = true))
+        assertFalse(ticket.releaseHold(original, resumed = true))
+        assertEquals("send once", ticket.finish(original, listOf("send once")))
+        assertNull(ticket.finish(original, listOf("duplicate")))
+    }
+
+    @Test fun aCancelledHoldCannotSendOnLateRelease() {
+        val terminal = Any()
+        val ticket = TerminalDictationTicket(terminal, holdToTalk = true)
+        assertTrue(ticket.claimStart(terminal, resumed = true))
+        ticket.cancel()
+        assertFalse(ticket.releaseHold(terminal, resumed = true))
+        assertNull(ticket.finish(terminal, listOf("cancelled take")))
+        assertFalse(ticket.allowsDelivery(terminal, resumed = true))
+    }
+
     @Test fun supportMetadataDistinguishesOfflineModelStates() {
         assertEquals(DictationModel.INSTALLED, onDeviceSpeechModel("en-US", listOf("en_us"), listOf(), listOf("en-US")))
         assertEquals(DictationModel.PENDING, onDeviceSpeechModel("en-US", listOf(), listOf("en-US"), listOf("en-US")))

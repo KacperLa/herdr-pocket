@@ -16,6 +16,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
@@ -25,6 +26,7 @@ import kotlin.math.floor
 @Composable
 internal fun DictationDock(
     phase: DictationPhase,
+    held: Boolean,
     levels: () -> List<Float>,
     onCancel: () -> Unit,
     onStop: () -> Unit,
@@ -53,7 +55,7 @@ internal fun DictationDock(
             if (processing || phase == DictationPhase.CAPTURED || phase == DictationPhase.STARTING) {
                 val label = stringResource(when {
                     processing -> R.string.dictation_transcribing
-                    phase == DictationPhase.CAPTURED -> R.string.dictation_recording_ready
+                    phase == DictationPhase.CAPTURED -> if (held) R.string.dictation_hold_release else R.string.dictation_recording_ready
                     else -> R.string.dictation_starting
                 })
                 Text(
@@ -61,8 +63,14 @@ internal fun DictationDock(
                     modifier = Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Polite },
                 )
             } else {
-                // Decorative only: TalkBack gets a stable recording message from the stop button.
-                Canvas(Modifier.weight(1f).height(34.dp)) {
+                // Tap mode gets a stable recording message from the stop button.
+                val heldDescription = if (held) stringResource(R.string.dictation_hold_release) else null
+                Canvas(Modifier.weight(1f).height(34.dp).then(
+                    if (heldDescription == null) Modifier else Modifier.semantics {
+                        contentDescription = heldDescription
+                        liveRegion = LiveRegionMode.Polite
+                    },
+                )) {
                     val history = levels()
                     val step = 5.dp.toPx()
                     val slots = floor(size.width / step).toInt()
@@ -77,7 +85,7 @@ internal fun DictationDock(
                     }
                 }
             }
-            if (phase.acceptsStopAndSend) {
+            if (phase.acceptsStopAndSend && !held) {
                 val action = stringResource(if (phase.isRecording) R.string.dictation_stop_and_send
                     else R.string.dictation_send_recording)
                 PocketIconControl(action, onStop, emphasized = phase.isRecording) { ink ->

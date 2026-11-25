@@ -15,6 +15,9 @@ import android.speech.SpeechRecognizer
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.Icon
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -31,6 +34,16 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.AwaitPointerEventScope
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerId
+import androidx.compose.ui.input.pointer.PointerInputChange
+import androidx.compose.ui.input.pointer.changedToUp
+import androidx.compose.ui.input.pointer.isOutOfBounds
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -94,6 +107,11 @@ internal fun TerminalDictationControls(
         }
     }
     val phase = dictation.phase
+    val micCoordinates = remember { DictationMicCoordinates() }
+    val canBeginPress by rememberUpdatedState(buttonEnabled && !dictation.permissionPending && take == null)
+    val currentAskPermission by rememberUpdatedState<() -> Unit>({
+        permission.launch(Manifest.permission.RECORD_AUDIO)
+    })
     LaunchedEffect(dictation, take, phase) {
         if (take == null) return@LaunchedEffect
         val timeout = when (phase) {
@@ -108,14 +126,15 @@ internal fun TerminalDictationControls(
     val description = when (phase) {
         DictationPhase.RECORDING, DictationPhase.CAPTURED -> "Stop recording, transcribe, and send with Enter"
         DictationPhase.PERMISSION -> "Waiting for microphone permission"
-        null -> "Start dictation recording"
+        null -> stringResource(R.string.dictation_mic_start)
         else -> "Cancel terminal dictation"
     }
     val message = when (phase) {
         DictationPhase.PERMISSION -> "Waiting for microphone permission."
         DictationPhase.WAITING_FOR_RESUME -> "Waiting for the terminal to return to the foreground."
         DictationPhase.STARTING -> "Starting the microphone."
-        DictationPhase.RECORDING -> "Recording. Pauses are OK. Tap again to transcribe and send."
+        DictationPhase.RECORDING -> if (take?.holdToTalk == true) "Recording. Release the mic to transcribe and send."
+            else "Recording. Pauses are OK. Tap again to transcribe and send."
         DictationPhase.STOPPING -> "Stopping the microphone."
         DictationPhase.CAPTURED -> "Recording reached its five-minute limit. Tap to transcribe and send."
         DictationPhase.TRANSCRIBING -> "Transcribing with Android’s selected speech service."
@@ -127,15 +146,6 @@ internal fun TerminalDictationControls(
     val currentOnExclusiveDock by rememberUpdatedState(onExclusiveDock)
     LaunchedEffect(exclusive) {
         if (exclusive) currentOnExclusiveDock()
-    }
-    if (exclusive && phase != null) {
-        DictationDock(
-            phase = phase,
-            levels = { dictation.micLevels },
-            onCancel = dictation::discardFromDock,
-            onStop = { dictation.tap {} },
-        )
-        return
     }
     dictation.startIssue?.let { issue ->
         PocketDialog(
@@ -149,23 +159,93 @@ internal fun TerminalDictationControls(
             },
         )
     }
-    shortcuts {
-        IconButton(
-            onClick = { dictation.tap { permission.launch(Manifest.permission.RECORD_AUDIO) } },
-            enabled = buttonEnabled && !dictation.permissionPending,
-            modifier = Modifier.size(DockTargetSize).semantics {
-                contentDescription = description
-                stateDescription = message
-                liveRegion = LiveRegionMode.Polite
-            },
-            colors = IconButtonDefaults.iconButtonColors(
-                containerColor = Color.Transparent, contentColor = Color.White,
-            ),
-        ) {
-            val color = if (!buttonEnabled || dictation.permissionPending) Color.White.copy(alpha = .38f) else Color.White
-            Icon(painterResource(R.drawable.ic_terminal_mic),contentDescription=null,
-                tint=color,modifier=Modifier.size(DockGlyphSize))
+    // This owner stays mounted when recording replaces the shortcut row with the waveform.
+    Box(Modifier.onGloballyPositioned { micCoordinates.owner = it }.pointerInput(dictation) {
+        val holdTimeout = viewConfiguration.longPressTimeoutMillis
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = true, pass = PointerEventPass.Initial)
+            if (!canBeginPress || !micCoordinates.hit(down.position)) return@awaitEachGesture
+            val pressedTerminal = currentTerminal()
+            down.consume()
+            // Wrap a nullable up event so a canceled short press is distinct from the timeout.
+            val early = withTimeoutOrNull(holdTimeout) {
+                DictationEarlyRelease(waitForDictationUp(down.id))
+            }
+            if (early != null) {
+                early.up?.consume()
+                if (early.up != null && currentTerminal() === pressedTerminal && canBeginPress) {
+                    dictation.tap(currentAskPermission)
+                }
+                return@awaitEachGesture
+            }
+            if (currentTerminal() !== pressedTerminal || !canBeginPress) return@awaitEachGesture
+            val ticket = dictation.beginHold(currentAskPermission) ?: return@awaitEachGesture
+            try {
+                val up = waitForDictationUp(down.id)
+                if (up != null) {
+                    up.consume()
+                    dictation.endHold(ticket, released = true)
+                }
+            } finally {
+                // Also runs if the gesture owner leaves composition (navigation, for example).
+                dictation.endHold(ticket, released = false)
+            }
         }
+    }) {
+        if (exclusive && phase != null) {
+            DictationDock(
+                phase = phase,
+                held = take?.holdToTalk == true,
+                levels = { dictation.micLevels },
+                onCancel = dictation::discardFromDock,
+                onStop = { dictation.tap {} },
+            )
+        } else shortcuts {
+            // IconButton retains keyboard and TalkBack click behavior; the parent only intercepts
+            // physical presses that start within this button’s measured bounds.
+            IconButton(
+                onClick = { dictation.tap(currentAskPermission) },
+                enabled = buttonEnabled && !dictation.permissionPending,
+                modifier = Modifier.size(DockTargetSize)
+                    .onGloballyPositioned { micCoordinates.button = it }
+                    .semantics {
+                        contentDescription = description
+                        stateDescription = message
+                        liveRegion = LiveRegionMode.Polite
+                    },
+                colors = IconButtonDefaults.iconButtonColors(
+                    containerColor = Color.Transparent, contentColor = Color.White,
+                ),
+            ) {
+                val color = if (!buttonEnabled || dictation.permissionPending) Color.White.copy(alpha = .38f) else Color.White
+                Icon(painterResource(R.drawable.ic_terminal_mic), contentDescription = null,
+                    tint = color, modifier = Modifier.size(DockGlyphSize))
+            }
+        }
+    }
+}
+
+private class DictationMicCoordinates {
+    var owner: LayoutCoordinates? = null
+    var button: LayoutCoordinates? = null
+
+    fun hit(position: Offset): Boolean {
+        val parent = owner?.takeIf { it.isAttached } ?: return false
+        val mic = button?.takeIf { it.isAttached } ?: return false
+        return parent.localBoundingBoxOf(mic).contains(position)
+    }
+}
+
+private class DictationEarlyRelease(val up: PointerInputChange?)
+
+private suspend fun AwaitPointerEventScope.waitForDictationUp(id: PointerId): PointerInputChange? {
+    while (true) {
+        val event = awaitPointerEvent(PointerEventPass.Initial)
+        val touch = event.changes.firstOrNull { it.id == id } ?: return null
+        if (event.changes.any { it.id != id && it.pressed } ||
+            touch.isConsumed || touch.isOutOfBounds(size, extendedTouchPadding)) return null
+        if (touch.changedToUp()) return touch
+        if (!touch.pressed) return null
     }
 }
 
@@ -188,6 +268,7 @@ private class TerminalDictation(
         private set
     var micLevels by mutableStateOf(emptyList<Float>())
         private set
+    private var holdPermissionPending = false
     private var recognizer: SpeechRecognizer? = null
     private var capture: DictationCapture? = null
     private var captured: DictationPcm? = null
@@ -204,6 +285,7 @@ private class TerminalDictation(
     fun tap(requestPermission: () -> Unit) {
         if (permissionPending) return
         take?.let { ticket ->
+            if (ticket.holdToTalk && !ticket.holdReleased) return
             when (phase) {
                 DictationPhase.RECORDING -> {
                     phase = DictationPhase.STOPPING
@@ -219,35 +301,79 @@ private class TerminalDictation(
             }
             return
         }
+        startCapture(hold = false, requestPermission)
+    }
+
+    fun beginHold(requestPermission: () -> Unit): TerminalDictationTicket? {
+        if (take != null || permissionPending || !resumed()) return null
+        return startCapture(hold = true, requestPermission)
+    }
+
+    fun endHold(ticket: TerminalDictationTicket, released: Boolean) {
+        if (take !== ticket || !ticket.holdToTalk || ticket.holdReleased) return
+        if (!released || !ticket.releaseHold(terminalIdentity(), resumed())) {
+            cancel("Dictation cancelled. Nothing was sent.")
+            return
+        }
+        when (phase) {
+            DictationPhase.RECORDING -> {
+                phase = DictationPhase.STOPPING
+                capture?.finish()
+            }
+            DictationPhase.CAPTURED -> {
+                val pcm = captured
+                captured = null
+                if (pcm != null) beginTranscription(ticket, pcm)
+                else cancel("No recording was available. Nothing was sent.", showToast = true)
+            }
+            else -> cancel("The microphone wasn’t ready. Hold the mic again to record.", showToast = true)
+        }
+    }
+
+    private fun startCapture(hold: Boolean, requestPermission: () -> Unit): TerminalDictationTicket? {
         val terminal = terminalIdentity()
         if (terminal == null) {
             startIssue = "Connect to a live SSH terminal to use dictation."
-            return
+            return null
         }
         notice = null
         if (!androidSpeechAvailable()) {
             startIssue = context.getString(R.string.dictation_android_speech_missing)
-            return
+            return null
         }
         val granted = hasMicPermission()
-        take = TerminalDictationTicket(terminal, granted)
+        val ticket = if (!hold || granted) TerminalDictationTicket(terminal, granted, hold) else null
+        take = ticket
         if (granted) {
             phase = DictationPhase.WAITING_FOR_RESUME
             startWhenResumed()
         } else {
-            phase = DictationPhase.PERMISSION
+            // A permission alert interrupts the physical hold. Never begin a hold recording
+            // from its asynchronous result: the user must make a fresh press.
+            if (!hold) phase = DictationPhase.PERMISSION
             permissionPending = true
+            holdPermissionPending = hold
             try {
                 requestPermission()
             } catch (_: RuntimeException) {
                 permissionPending = false
+                holdPermissionPending = false
                 cancel("Could not request microphone access. Check Herdr’s permissions in Android Settings.")
             }
         }
+        return ticket?.takeIf { take === it }
     }
 
     fun permissionResult(granted: Boolean) {
         permissionPending = false
+        if (holdPermissionPending) {
+            holdPermissionPending = false
+            val message = if (granted) "Microphone access granted. Hold the mic again to record."
+                else "Microphone access denied. Allow it in Android Settings to dictate."
+            notice = message
+            toast(message)
+            return
+        }
         val ticket = take ?: return // A recreated activity must not resume a previous recording.
         if (phase != DictationPhase.PERMISSION) return
         when (ticket.permissionResult(granted, terminalIdentity())) {
@@ -281,7 +407,7 @@ private class TerminalDictation(
             if (take === ticket && phase == DictationPhase.RECORDING)
                 micLevels = appendDictationLevel(micLevels, level)
         }, onComplete = { pcm, capped ->
-            capture = null
+            if (take === ticket) capture = null
             if (take !== ticket || !stillHere(ticket)) {
                 pcm?.close()
             } else if (pcm == null) {
@@ -291,7 +417,8 @@ private class TerminalDictation(
             } else if (capped && phase == DictationPhase.RECORDING) {
                 captured = pcm
                 phase = DictationPhase.CAPTURED
-                toast("Five-minute recording limit reached. Tap the stop button to transcribe and send.")
+                toast(if (ticket.holdToTalk) "Five-minute recording limit reached. Release to transcribe and send."
+                    else "Five-minute recording limit reached. Tap the stop button to transcribe and send.")
             } else {
                 pcm.close()
                 cancel("Recording stopped unexpectedly. Nothing was sent.", showToast = true)

@@ -28,7 +28,11 @@ internal fun terminalDictationText(result: String?): String? {
 }
 
 /** A listener owns one ticket. Even an invalid/empty final callback consumes it. */
-internal class TerminalDictationTicket(val terminal: Any, permissionGranted: Boolean = true) {
+internal class TerminalDictationTicket(
+    val terminal: Any, permissionGranted: Boolean = true, val holdToTalk: Boolean = false,
+) {
+    var holdReleased = !holdToTalk
+        private set
     private var granted = permissionGranted
     private var started = false
     private var finished = false
@@ -46,13 +50,19 @@ internal class TerminalDictationTicket(val terminal: Any, permissionGranted: Boo
         return true
     }
 
+    fun releaseHold(currentTerminal: Any?, resumed: Boolean): Boolean {
+        if (!holdToTalk || holdReleased || !started || finished || !resumed || currentTerminal !== terminal) return false
+        holdReleased = true
+        return true
+    }
+
     fun cancel() {
         finished = true
         hasText = false
     }
 
     fun finish(currentTerminal: Any?, results: List<String>?): String? {
-        if (finished) return null
+        if (finished || !holdReleased) return null
         finished = true
         val text = if (currentTerminal === terminal) results?.asSequence()?.take(10)
             ?.mapNotNull(::terminalDictationText)?.firstOrNull() else null
