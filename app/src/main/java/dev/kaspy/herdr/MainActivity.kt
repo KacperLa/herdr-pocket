@@ -21,6 +21,7 @@ import android.util.Base64
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.AndroidViewModel
@@ -2984,11 +2985,31 @@ private data class PendingTerminalLink(val target:TerminalWebLink,val route:Remo
     val files = m.filesUi
     val menuOpen = m.agentMenuOpen
     val back=if(opening!=null) m::cancelTerminalOpening else m::openAgentSwitcher
-    BackHandler(enabled = !menuOpen && files == null, onBack = back)
+    // This is only a view preference for the current terminal, not a navigation destination.
+    var headerHidden by remember(m.emulator,opening) {mutableStateOf(false)}
+    val hideHeader=stringResource(R.string.terminal_header_hide)
+    val showHeader=stringResource(R.string.terminal_header_show)
+    val interactiveHeader=opening==null && !menuOpen && files==null
+    BackHandler(enabled = !menuOpen && files == null) {
+        if(headerHidden) headerHidden=false else back()
+    }
+    val restoreAction=if(headerHidden && interactiveHeader) Modifier.semantics {
+        customActions=listOf(CustomAccessibilityAction(showHeader) {headerHidden=false;true})
+    } else Modifier
+    val swipeToHide=if(interactiveHeader) Modifier.pointerInput(Unit) {
+        val threshold=24.dp.toPx()
+        var distance=0f
+        detectVerticalDragGestures(
+            onDragStart={distance=0f},
+            onDragEnd={if(distance<=-threshold) headerHidden=true},
+        ) { _,delta -> distance+=delta }
+    } else Modifier
     Box(Modifier.fillMaxSize().safeDrawingPadding()) {
-        TerminalPanel(m,Modifier.fillMaxSize().imePadding(),suspended=menuOpen || files!=null,opening=opening!=null) {
-            if (!menuOpen && files == null) Row(
-                Modifier.align(androidx.compose.ui.Alignment.TopStart).fillMaxWidth().padding(horizontal=12.dp,vertical=6.dp),
+        TerminalPanel(m,Modifier.fillMaxSize().imePadding().then(restoreAction),
+            suspended=menuOpen || files!=null,opening=opening!=null) {
+            if (!headerHidden && !menuOpen && files == null) Row(
+                Modifier.align(androidx.compose.ui.Alignment.TopStart).fillMaxWidth()
+                    .then(swipeToHide).padding(horizontal=12.dp,vertical=6.dp),
                 verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,
                 horizontalArrangement=Arrangement.spacedBy(8.dp),
             ) {
@@ -2999,8 +3020,12 @@ private data class PendingTerminalLink(val target:TerminalWebLink,val route:Remo
                         border=BorderStroke(1.dp,PocketOutline),
                     ) {
                         Box(Modifier.height(headerSize),contentAlignment=androidx.compose.ui.Alignment.Center) {
+                            val hideAction=if(interactiveHeader) Modifier.semantics {
+                                customActions=listOf(CustomAccessibilityAction(hideHeader) {headerHidden=true;true})
+                            } else Modifier
                             Text((opening?.title ?: m.agentName).ifBlank{"Agent"},fontSize=20.sp,lineHeight=24.sp,
-                                modifier=Modifier.padding(horizontal=15.dp),maxLines=1,overflow=TextOverflow.Ellipsis)
+                                modifier=Modifier.padding(horizontal=15.dp).then(hideAction),
+                                maxLines=1,overflow=TextOverflow.Ellipsis)
                         }
                     }
                 }

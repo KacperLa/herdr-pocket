@@ -29,4 +29,6 @@
     <string name="agent_roster_choose_workspace">Choose a workspace</string>
     <string name="agent_roster_workspace_opens_shell">Open a new shell here, then start your agent from it.</string>
     <string name="agent_roster_no_workspace_destinations">No workspaces are available. Refresh the session list or check that Herdr is up to date.</string>
+    <string name="terminal_header_hide">Hide terminal header</string>
+    <string name="terminal_header_show">Show terminal header</string>
 </resources>
