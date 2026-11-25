@@ -213,3 +213,16 @@ The quick actions and direction popover hide during capture and processing. A ri
 ### 0.85: changed SSH host identity
 
 Host trust tests cover leaving the saved key intact until confirmation, stale offers, failed writes, and host/port isolation. The disposable SSH fixture rejects a mismatched pin, observes no authentication or command during explicit review, and authenticates only on a separate connection after explicit replacement. Release build, app and terminal unit tests, and release lint passed; the dialog was not exercised on a handset.
+
+### 0.93-live: stored Codex readback
+
+The app tests cover the exact Herdr session binding, fixed read-only RPCs,
+partial/malformed responses, the Herdr work-cycle gate, delayed persistence,
+old/interrupted/duplicate turns, mismatched prompts, and a final reply with an
+ordinary follow-up question. The optional `python3 tests/live/codex-history.py`
+contract check runs the installed Codex App Server against isolated synthetic
+history. The SSH fixture checks that a fragmented RPC response closes its own
+channel without changing the attached terminal. Handset smoke test: in a
+Codex tab with saved history, start a call, approve one question, and check
+that the readback dialog contains the matching new answer. Try a blocked turn
+and another phone-side terminal; neither should produce a readback draft.

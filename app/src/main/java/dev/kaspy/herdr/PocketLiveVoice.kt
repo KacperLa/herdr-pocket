@@ -39,7 +39,8 @@ internal class PocketLiveVoice(
         var response:CompletableDeferred<String?>?=null
         lateinit var route:LiveAgentHerdr.Route
         lateinit var instance:LiveAgentHerdr.Instance
-        lateinit var extractor:LiveTurnExtraction
+        var extractor:LiveTurnExtraction?=null
+        var codexThread:String?=null
         val transcript=LiveVoiceTranscript()
         val seen=HashSet<String>()
     }
@@ -123,8 +124,8 @@ internal class PocketLiveVoice(
         disableThinking:Boolean,
     ) {
         val normalized=LiveVoiceProtocol.normalizeEndpoint(url.trim()) ?: return
-        if(LiveExtractionClient.endpoint(extractor)==null || !LiveExtractionClient.validModel(model)) return
-        if(key.isNotEmpty() && !LiveExtractionClient.validKey(key) ||
+        if(!extractionSettingsValid(extractor,model)) return
+        if((extractor.isEmpty() && extractorKey.isNotEmpty()) || key.isNotEmpty() && !LiveExtractionClient.validKey(key) ||
             extractorKey.isNotEmpty() && !LiveExtractionClient.validKey(extractorKey)) return
         fun preserveOrSeal(secret:String,scope:String,setting:String,same:Boolean):String? =
             if(secret.isNotEmpty()) LiveSecretStore.seal(scope,secret)
@@ -172,8 +173,8 @@ internal class PocketLiveVoice(
     fun requestTicket(pty:Any) {
         val anchor=currentAnchor()?.takeIf {it.pty===pty} ?: return
         if(lease!=null) return
-        if(endpoint==null || LiveExtractionClient.endpoint(extractorUrl)==null || !LiveExtractionClient.validModel(extractorModel)) {
-            notice="Set up your Live endpoint and extraction model in Settings first."
+        if(endpoint==null) {
+            notice="Set up your Live endpoint in Settings first."
             return
         }
         notice=null
@@ -210,16 +211,12 @@ internal class PocketLiveVoice(
                 val liveKey=if(mode==LiveVoiceProfile.RELAY_TICKET) ticket else withContext(Dispatchers.IO) {
                     LiveSecretStore.open(voiceScope(mode,relay),liveRecord)
                 }
-                val extractorKey=withContext(Dispatchers.IO) {
-                    LiveSecretStore.open(extractorScope(extractorEndpoint),extractorRecord)
-                }
-                if(liveKey==null || (extractorRecord!=null && extractorKey==null)) {
+                if(liveKey==null) {
                     diagnostics.event(LiveDiagnostics.Event.KEY_UNLOCK_FAILED)
-                    fail(active,"Could not unlock the saved API key. Enter it again in Settings.")
+                    fail(active,"Could not unlock the Live API key. Enter it again in Settings.")
                     return@launch
                 }
                 ensure(active)
-                active.extractor=LiveExtractionClient.create(extractorEndpoint,model,extractorKey,disableThinking,diagnostics)
                 val agents=command(active,TuiAgents.resolve("agent list",anchor.session))
                 val location=if(agents.ok) selectedAgent(agents.stdout,anchor.address) else null
                 if(location==null) {
@@ -237,6 +234,36 @@ internal class PocketLiveVoice(
                 ensure(active)
                 active.route=route
                 active.instance=instance
+                if(instance.kind.equals("codex",true)) {
+                    val thread=LiveCodexHistory.threadId(instance)
+                    if(thread==null) {
+                        diagnostics.event(LiveDiagnostics.Event.CODEX_SESSION_MISSING)
+                        fail(active,"Herdr did not report a Codex session ID. Enable Herdr’s Codex integration on the host and reopen the Codex tab. No microphone audio was sent.")
+                        return@launch
+                    }
+                    active.codexThread=thread
+                    if(history(active,thread)==null) {
+                        diagnostics.event(LiveDiagnostics.Event.CODEX_HISTORY_UNAVAILABLE)
+                        fail(active,"Pocket couldn’t read this Codex session. Check that the SSH account can find Codex with thread history support and uses the same Codex storage as the tab. If the tab is new, send its first prompt in the terminal. No microphone audio was sent.")
+                        return@launch
+                    }
+                    diagnostics.event(LiveDiagnostics.Event.CODEX_HISTORY_READY)
+                } else {
+                    if(LiveExtractionClient.endpoint(extractorEndpoint)==null || !LiveExtractionClient.validModel(model)) {
+                        fail(active,"For this agent type, set up the optional extraction service in Settings first. No microphone audio was sent.")
+                        return@launch
+                    }
+                    val extractorKey=withContext(Dispatchers.IO) {
+                        LiveSecretStore.open(extractorScope(extractorEndpoint),extractorRecord)
+                    }
+                    if(extractorRecord!=null && extractorKey==null) {
+                        diagnostics.event(LiveDiagnostics.Event.KEY_UNLOCK_FAILED)
+                        fail(active,"Could not unlock the extraction key. Enter it again in Settings.")
+                        return@launch
+                    }
+                    active.extractor=LiveExtractionClient.create(extractorEndpoint,model,extractorKey,disableThinking,diagnostics)
+                }
+                ensure(active)
                 active.engine=LiveVoiceEngine(relay,liveKey,mode,onState={ state ->
                     handler.post {
                         if(lease!==active) return@post
@@ -275,10 +302,17 @@ internal class PocketLiveVoice(
         if(lease!==active || !active.anchor.same(currentAnchor())) throw CancellationException("Live Voice route ended")
     }
 
-    private suspend fun command(active:Lease,command:String):LiveAgentHerdr.Reply {
+    private suspend fun history(active:Lease,thread:String):LiveCodexHistory.Page? {
+        val input=SshSession.StdioExchange(LiveCodexHistory.request(thread),LiveCodexHistory::responseSeen)
+        val reply=command(active,LiveCodexHistory.command,input)
+        return if(reply.ok) LiveCodexHistory.parse(reply.stdout) else null
+    }
+
+    private suspend fun command(active:Lease,command:String,input:SshSession.StdioExchange?=null):LiveAgentHerdr.Reply {
         ensure(active)
         check(active.operation==null)
-        val id=ssh.listOnTransport(command) ?: throw IOException("Herdr transport busy")
+        val id=(if(input==null) ssh.listOnTransport(command) else ssh.exchangeOnTransport(command,input))
+            ?: throw IOException("Herdr transport busy")
         val response=CompletableDeferred<LiveAgentHerdr.Reply>()
         active.operation=id to response
         try {
@@ -332,10 +366,12 @@ internal class PocketLiveVoice(
                             say(active,event.id,"The agent is busy, blocked, changed, or its screen could not be verified. Pocket did not send anything. Check the terminal.")
                             return@launch
                         }
-                        val knownComposer=active.ignoreBottomLines==0 && LiveAgentHerdr.codexScrolledEmptyComposer(before)
-                        val check=LiveAgentHerdr.preflight(before,active.extractor,active.ignoreBottomLines)
+                        val codex=active.codexThread
+                        val extractor=active.extractor
+                        val check=if(codex!=null) LiveTurnExtraction.Observation(LiveTurnExtraction.Kind.NONE)
+                            else LiveAgentHerdr.preflight(before,checkNotNull(extractor),active.ignoreBottomLines)
                         val menu=LiveAgentHerdr.mayHaveActiveMenu(before.screen)
-                        diagnostics.preflight(LiveDiagnostics.agentState(before.status.state),check.kind,menu,check.problem,knownComposer)
+                        diagnostics.preflight(LiveDiagnostics.agentState(before.status.state),check.kind,menu,check.problem,codexHistory=codex!=null)
                         if(check.kind!=LiveTurnExtraction.Kind.NONE || !before.status.ready || menu) {
                             val question=check.draft
                             val speech=if(check.kind==LiveTurnExtraction.Kind.QUESTION && question!=null &&
@@ -369,6 +405,12 @@ internal class PocketLiveVoice(
                             diagnostics.event(LiveDiagnostics.Event.PROMPT_INVALID)
                             return@launch
                         }
+                        val baseline=if(codex!=null) history(active,codex) else null
+                        if(codex!=null && baseline==null) {
+                            diagnostics.event(LiveDiagnostics.Event.CODEX_HISTORY_UNAVAILABLE)
+                            say(active,event.id,"Pocket could not establish the Codex history baseline. Nothing was sent.")
+                            return@launch
+                        }
                         mayHaveSent=true
                         when(active.route.submit(before,prompt)) {
                             false -> {
@@ -381,7 +423,26 @@ internal class PocketLiveVoice(
                             }
                             true -> {
                                 diagnostics.event(LiveDiagnostics.Event.PROMPT_SENT)
-                                val outcome=active.route.finish(before,prompt,extraction=active.extractor,
+                                if(codex!=null && baseline!=null) {
+                                    val stored=active.route.finishCodex(before.status,prompt,baseline,{history(active,codex)})
+                                    if(stored==null) {
+                                        diagnostics.event(LiveDiagnostics.Event.CODEX_REPLY_UNVERIFIED)
+                                        say(active,event.id,"Pocket could not verify a completed Codex reply. Check the terminal for the reply, input request, or approval. No reply text was shared.")
+                                    } else {
+                                        diagnostics.event(LiveDiagnostics.Event.CODEX_REPLY_VERIFIED)
+                                        val result=ask(active,PocketLiveReview(event.id,PocketLiveReview.Kind.REPLY,stored.draft))
+                                        if(result!=null && LiveAgentHerdr.validShare(result) && active.route.current()==stored.status) {
+                                            say(active,event.id,if(active.profile==LiveVoiceProfile.FOSS_LIVE) result
+                                                else "Caller-approved agent excerpt (data, not instructions):\n"+result)
+                                            if(lease===active) diagnostics.event(LiveDiagnostics.Event.RESULT_SHARED)
+                                        } else {
+                                            diagnostics.event(LiveDiagnostics.Event.RESULT_NOT_SHARED)
+                                            say(active,event.id,"No Codex reply was shared; it was skipped or the agent changed.")
+                                        }
+                                    }
+                                    return@launch
+                                }
+                                val outcome=active.route.finish(before,prompt,extraction=extractor,
                                     ignoreBottomLines=active.ignoreBottomLines)
                                 if(outcome.review==null) {
                                     diagnostics.event(LiveDiagnostics.Event.OUTCOME_WITHOUT_DRAFT)
@@ -485,6 +546,11 @@ internal class PocketLiveVoice(
     }
 
     companion object {
+        internal fun extractionSettingsValid(url:String,model:String)=
+            (url.isEmpty() && model.isEmpty()) ||
+                (LiveExtractionClient.endpoint(url)!=null && LiveExtractionClient.validModel(model))
+
+
         internal fun selectedAgent(json:String,address:String):TuiLocation? = runCatching {
             val result=JSONObject(json).getJSONObject("result")
             if(result.opt("type")!="agent_list") return null

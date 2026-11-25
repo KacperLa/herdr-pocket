@@ -149,6 +149,42 @@ internal object LiveAgentHerdr {
             return if(acknowledgement?.instance==expected.status.instance) true else null
         }
 
+        data class StoredReply(val status: Status, val draft: String)
+
+        suspend fun finishCodex(
+            before: Status, text: String, baseline: LiveCodexHistory.Page,
+            readHistory: suspend () -> LiveCodexHistory.Page?,
+            attempts: Int = 100, pause: suspend () -> Unit = { delay(1000) },
+        ): StoredReply? {
+            var working = false
+            var reads = 0
+            var stable: Status? = null
+            repeat(attempts) {
+                pause()
+                val state = current() ?: return null
+                if (state.instance != before.instance || state.sequence < before.sequence || state.state == "blocked")
+                    return null
+                if (state.state == "working" && state.sequence > before.sequence) working = true
+                val completion = state.completion?.let { it > maxOf(before.sequence, before.completion ?: 0uL) } == true
+                if (!state.ready || state.sequence <= before.sequence || !(working || completion)) {
+                    stable = null
+                    return@repeat
+                }
+                if (stable != state) {
+                    stable = state
+                    return@repeat
+                }
+                val page = readHistory()
+                if (current() != state) return null
+                when (val match = page?.let { LiveCodexHistory.match(baseline, it, text) }) {
+                    is LiveCodexHistory.Match.Completed -> return StoredReply(state, match.draft)
+                    LiveCodexHistory.Match.Uncertain -> return null
+                    LiveCodexHistory.Match.Waiting, null -> if (++reads >= 3) return null
+                }
+            }
+            return null
+        }
+
         suspend fun finish(
             before:Capture,text:String,
             attempts:Int=180,pause:suspend ()->Unit={delay(620)},

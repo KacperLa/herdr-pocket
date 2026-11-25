@@ -57,7 +57,7 @@ internal fun LiveVoiceServiceSettings(voice:PocketLiveVoice) {
     if(profile!=LiveVoiceProfile.RELAY_TICKET) OutlinedTextField(value=key,onValueChange={key=it.take(2048)},
         label={Text("Live API key")},singleLine=true,visualTransformation=PasswordVisualTransformation(),
         keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Password),modifier=Modifier.fillMaxWidth())
-    Text("Extraction sends the selected agent’s visible terminal text to the model below. Use a service you trust. Only the speech draft you approve goes to Live Voice.")
+    Text("Codex uses stored replies over SSH, without an extraction model. For other agents, the optional service below receives visible terminal text. Only text you approve is shared with Live Voice.")
     OutlinedTextField(value=extractor,onValueChange={extractor=it.take(2048)},singleLine=true,
         label={Text("Extraction URL (full chat completions endpoint)")},modifier=Modifier.fillMaxWidth(),
         keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Uri))
@@ -82,7 +82,8 @@ internal fun LiveVoiceServiceSettings(voice:PocketLiveVoice) {
         voice.configure(profile,endpoint.trim(),key.trim(),extractor.trim(),model.trim(),extractorKey.trim(),disableThinking)
         key="";extractorKey=""
     },enabled=LiveVoiceProtocol.normalizeEndpoint(endpoint.trim())!=null &&
-        LiveExtractionClient.endpoint(extractor.trim())!=null && LiveExtractionClient.validModel(model.trim())) {Text("Save Live Voice settings")}
+        PocketLiveVoice.extractionSettingsValid(extractor.trim(),model.trim()) &&
+        (extractor.isNotBlank() || extractorKey.isBlank())) {Text("Save Live Voice settings")}
     val extractionMatchesSaved=extractor.trim()==voice.extractorUrl && model.trim()==voice.extractorModel &&
         extractorKey.isEmpty() && voice.extractorUrl.isNotEmpty() && disableThinking==voice.disableExtractionThinking
     TextButton(onClick=voice::testSavedExtraction,enabled=extractionMatchesSaved && !voice.extractionChecking) {
@@ -120,13 +121,13 @@ internal fun LiveVoiceDialogs(voice:PocketLiveVoice) {
         PocketDialog(onDismissRequest=voice::cancelTicket,title={Text("Start Live Voice?")},
             text={
                 Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(10.dp)) {
-                    Text("Microphone audio goes to your Live endpoint. The extraction service receives visible terminal snapshots to check for questions and replies. Pocket asks before submitting an agent prompt or sharing a speech draft.")
+                    Text("Microphone audio goes to your Live endpoint. Codex uses stored replies over SSH. Other agents use the optional extraction service, which receives visible terminal snapshots. Pocket asks before submitting a prompt or sharing a reply.")
                     Text("Live: "+(voice.endpoint.orEmpty()))
-                    Text("Extraction: "+voice.extractorUrl)
-                    OutlinedTextField(value=bottomLines,onValueChange={ value ->
+                    if(voice.extractorUrl.isNotEmpty()) Text("Optional extractor: "+voice.extractorUrl)
+                    if(voice.extractorUrl.isNotEmpty()) OutlinedTextField(value=bottomLines,onValueChange={ value ->
                         if(value.length<=2 && value.all {it in '0'..'9'}) bottomLines=value
                     },label={Text("Ignore bottom lines")},singleLine=true,isError=bottomLines.isNotEmpty() && bottom==null,
-                        supportingText={Text("0–${LiveExtractionWindow.MAX_IGNORED_LINES}. Saved for this pane when you start. Only crops what the extractor sees.")},
+                        supportingText={Text("0–${LiveExtractionWindow.MAX_IGNORED_LINES}. Only applies to the optional extractor for non-Codex panes.")},
                         keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),modifier=Modifier.fillMaxWidth())
                     if(voice.profile==LiveVoiceProfile.RELAY_TICKET) OutlinedTextField(value=ticket,onValueChange={ticket=it.take(160)},
                         label={Text("One-time relay ticket")},singleLine=true,

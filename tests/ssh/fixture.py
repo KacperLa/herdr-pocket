@@ -219,6 +219,15 @@ def exercise_same_transport(t, s, connection):
     listing.send_exit_status(0)
     listing.close()
 
+    exchange = expect_channel(t, s, 'exec codex app-server --listen stdio://')
+    assert exchange.recv(100) == b'{"id":2}\n'
+    exchange.sendall(b'{"method":"notice"}\n{"id":2,')
+    time.sleep(.1)
+    assert not exchange.closed, 'partial RPC frame ended exchange'
+    exchange.sendall(b'"result":{}}\n')
+    assert exchange.recv(100) == b'', 'client did not close its one-shot channel'
+    exchange.close()
+
     failed = expect_channel(t, s, FAIL_SUFFIX)
     assert old.recv(100) == b'after failure'
     old.sendall(b'old after failure')

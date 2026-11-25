@@ -106,41 +106,37 @@ trusted service:
 - **One-time relay ticket:** use the existing [private relay](tools/live-relay)
   and paste a fresh ticket at call start.
 
-Also configure the full HTTPS **Extraction URL** (e.g.
-`https://models.example/v1/chat/completions`), a chat model that supports
-structured JSON responses, and its bearer key if needed. The extraction and
-voice services can be on the same trusted host, but they use different APIs
-and credentials. Saved credentials are encrypted with Android Keystore and
-bound to the configured endpoint. Editing a URL does not move its saved key
-to the new endpoint. Use **Test saved extraction** to check its URL, key and
-JSON mode with synthetic text before opening a call. The stock FOSS-Live
-server is the Live endpoint, not a Chat Completions endpoint. For a compatible
-llama.cpp backend, **Disable thinking for extraction** requests no thinking
-for Pocket’s JSON requests only. Save the setting and rerun the test. Your
-gateway must forward the per-request fields and the backend must honor them;
-this does not change server defaults or the Live API.
+**Codex:** No extraction model, new daemon, or network port is required.
+Pocket opens a short-lived read-only Codex App Server process over the existing
+SSH connection. The SSH account must be able to find a Codex version that
+supports `thread/turns/list` and see the same persisted Codex history as the
+selected tab. If Herdr does not already report the native Codex session ID,
+run `herdr integration install codex` on the host and relaunch Codex inside
+Herdr. A brand-new session may need its first prompt in the terminal to create
+history. Pocket does not install software or change host config.
 
-Open a recognized Herdr TUI agent and tap the waveform. The start dialog shows
-which service receives microphone audio and which receives visible terminal
-snapshots. A single outstanding delegation can be reviewed and then submitted
-through Herdr. Pocket detects whether the settled screen is a question or
-completion, then makes a separate structured extraction request. Question
-and choice text must appear in the terminal; a completion requires a fresh
-verbatim evidence quote and a real Herdr work cycle. Pocket shows a local,
-editable speech draft and rechecks the selected pane and screen before
-sending it to the Live service. It does not answer a question, approve a
-request, or retry uncertain agent input automatically. If the response is
-ambiguous, stale, or truncated, check the terminal instead. Leaving the pane
-closes voice, but does not cancel agent work already submitted.
+Herdr remains the source of agent state. After you approve a prompt, Pocket
+tracks a Herdr work cycle and reads only the newly completed Codex turn that
+matches that prompt. The terminal remains available for live input requests
+and approvals; ordinary follow-up questions in completed replies can be read
+aloud. Pocket shows an editable readback draft before sharing it with the Live
+service. If it cannot verify a reply, it does not read the screen as a fallback.
 
+**Other agents:** To use the previous screen-based method, configure the full
+HTTPS **Extraction URL**, a chat model that supports structured JSON, and its
+bearer key if required. These are separate from the Live URL and key. Stored
+keys are encrypted with Android Keystore and bound to their configured URL.
+Use **Test saved extraction** to check the settings with synthetic text.
+For compatible llama.cpp servers, **Disable thinking for extraction** affects
+Pocket’s requests only. The extractor receives visible terminal snapshots;
+**Ignore bottom lines** removes the selected number of rows for that pane.
+Pocket still checks uncropped text locally for approvals and changed screens.
+
+Open a recognized Herdr TUI agent and tap the waveform. Pocket will not
+automatically answer, approve, or retry uncertain agent input. Leaving the pane
+ends voice, but does not cancel agent work already submitted.
 
 After a failed test or call, open **Live Voice preview → View diagnostics →
 Copy diagnostics**. The recent log exists only in memory and contains
 allowlisted event names and counts, not URLs, keys, terminal text, transcripts
 or raw service responses.
-
-
-The call-start dialog's **Ignore bottom lines** option hides the selected
-number of captured rows from extraction for this pane. Pocket remembers the
-count per pane and still checks the original terminal for approval menus and
-screen changes before any prompt is submitted.
