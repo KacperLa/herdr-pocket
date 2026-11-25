@@ -64,6 +64,11 @@ internal object AgentFiles {
         return if (dir == "/") "/$name" else "$dir/$name"
     }
 
+    fun clipboardPath(folder: String?, name: String? = null): String? {
+        val parent = absolute(folder) ?: return null
+        return if (name == null) parent else if (entryName(name)) child(parent, name) else null
+    }
+
     fun contains(root: String, path: String): Boolean =
         root == "/" && path.startsWith('/') || path == root || path.startsWith("$root/")
 

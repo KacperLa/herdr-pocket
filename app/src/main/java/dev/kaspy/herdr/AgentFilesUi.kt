@@ -1,9 +1,12 @@
 package dev.kaspy.herdr
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Paint
 import android.graphics.Typeface
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
@@ -317,6 +320,7 @@ internal fun AgentFilesExplorer(
         folder != null -> displayFileName(folder)
         else -> stringResource(R.string.agent_files_title)
     }
+    val previewName = preview?.name ?: image?.name ?: unrenderableName
     val isDirectoryTitle = preview == null && image == null && unrenderableName == null && folder != null
     val canUseEntries = !state.loading && !state.uploading && !state.deleting && !state.creatingFolder &&
         state.deletePrompt == null && state.newFolderPrompt == null
@@ -376,31 +380,35 @@ internal fun AgentFilesExplorer(
     ) {
         Column(Modifier.fillMaxSize().safeDrawingPadding()) {
             val previewAction: (@Composable () -> Unit)? = when {
-                preview != null -> {
+                previewName != null && !state.loading && state.error == null -> {
                     {
-                        key(folder, preview.name) {
+                        key(folder, previewName) {
                             PreviewOptionsMenu(
-                                wrap = wrap,
-                                onWrapChange = {
-                                    wrap = it
-                                    viewerPreferences.setWrap(it)
-                                },
-                                lineNumbers = lineNumbers,
-                                onLineNumbersChange = {
-                                    lineNumbers = it
-                                    viewerPreferences.setLineNumbers(it)
-                                },
+                                copyPath = AgentFiles.clipboardPath(folder, previewName),
                                 downloading = state.downloading,
                                 onDownload = onDownload,
+                                textOptions = if (preview == null) null else ({
+                                    PreviewToggle(stringResource(R.string.agent_files_wrap), wrap) {
+                                        wrap = it
+                                        viewerPreferences.setWrap(it)
+                                    }
+                                    PreviewToggle(stringResource(R.string.agent_files_line_numbers), lineNumbers) {
+                                        lineNumbers = it
+                                        viewerPreferences.setLineNumbers(it)
+                                    }
+                                    HorizontalDivider()
+                                }),
                             )
                         }
                     }
                 }
-                (image != null || unrenderableName != null) && !state.loading && state.error == null -> {
-                    { FileTransferButton(upload = false, enabled = !state.downloading, onClick = onDownload) }
-                }
                 isDirectoryTitle && state.error == null -> {
-                    { FilesFolderOptions(enabled = canUseEntries, onUpload = onUpload, onNewFolder = onNewFolder) }
+                    { key(folder) {
+                        FilesFolderOptions(
+                            enabled = canUseEntries, copyPath = AgentFiles.clipboardPath(folder),
+                            onUpload = onUpload, onNewFolder = onNewFolder,
+                        )
+                    } }
                 }
                 else -> null
             }
@@ -514,7 +522,9 @@ internal fun AgentFilesExplorer(
                                     }
                                     if (entry.canOpen) {
                                         Box(Modifier.padding(end = 8.dp)) {
-                                            FilesEntryOptions(entry, canUseEntries) { onDeleteEntry(entry) }
+                                            FilesEntryOptions(entry, canUseEntries, AgentFiles.clipboardPath(folder, entry.name)) {
+                                                onDeleteEntry(entry)
+                                            }
                                         }
                                     }
                                 }
@@ -529,11 +539,12 @@ internal fun AgentFilesExplorer(
 }
 
 @Composable
-private fun FilesFolderOptions(enabled: Boolean, onUpload: () -> Unit, onNewFolder: () -> Unit) {
+private fun FilesFolderOptions(enabled: Boolean, copyPath: String?, onUpload: () -> Unit, onNewFolder: () -> Unit) {
     var open by remember { mutableStateOf(false) }
     Box {
         OverflowDotsButton(48.dp, stringResource(R.string.agent_files_folder_options), { open = true }, enabled)
         PocketMenu(expanded = open && enabled, onDismissRequest = { open = false }) {
+            copyPath?.let { CopyPathMenuItem(it) { open = false } }
             DropdownMenuItem(
                 text = { Text(stringResource(R.string.agent_files_upload_menu)) },
                 onClick = { open = false; onUpload() },
@@ -582,7 +593,7 @@ private fun NewFilesFolderDialog(
 }
 
 @Composable
-private fun FilesEntryOptions(entry: AgentFileEntry, enabled: Boolean, onDelete: () -> Unit) {
+private fun FilesEntryOptions(entry: AgentFileEntry, enabled: Boolean, copyPath: String?, onDelete: () -> Unit) {
     var open by remember(entry) { mutableStateOf(false) }
     Box {
         if (enabled) {
@@ -591,6 +602,7 @@ private fun FilesEntryOptions(entry: AgentFileEntry, enabled: Boolean, onDelete:
             })
         } else Spacer(Modifier.size(48.dp))
         PocketMenu(expanded = open && enabled, onDismissRequest = { open = false }) {
+            copyPath?.let { CopyPathMenuItem(it) { open = false } }
             DropdownMenuItem(
                 text = { Text(stringResource(
                     if(entry.isDirectory) R.string.agent_files_remove_directory else R.string.agent_files_delete,
@@ -603,20 +615,17 @@ private fun FilesEntryOptions(entry: AgentFileEntry, enabled: Boolean, onDelete:
 
 @Composable
 private fun PreviewOptionsMenu(
-    wrap: Boolean,
-    onWrapChange: (Boolean) -> Unit,
-    lineNumbers: Boolean,
-    onLineNumbersChange: (Boolean) -> Unit,
+    copyPath: String?,
     downloading: Boolean,
     onDownload: () -> Unit,
+    textOptions: (@Composable () -> Unit)?,
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box {
         OverflowDotsButton(48.dp, stringResource(R.string.agent_files_preview_options), { expanded = true })
         PocketMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            PreviewToggle(stringResource(R.string.agent_files_wrap), wrap, onWrapChange)
-            PreviewToggle(stringResource(R.string.agent_files_line_numbers), lineNumbers, onLineNumbersChange)
-            HorizontalDivider()
+            textOptions?.invoke()
+            copyPath?.let { CopyPathMenuItem(it) { expanded = false } }
             DropdownMenuItem(
                 text = { Text(stringResource(R.string.agent_files_download)) },
                 onClick = { expanded = false; onDownload() },
@@ -625,6 +634,22 @@ private fun PreviewOptionsMenu(
             )
         }
     }
+}
+
+@Composable
+private fun CopyPathMenuItem(path: String, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    DropdownMenuItem(
+        text = { Text(stringResource(R.string.agent_files_copy_path)) },
+        onClick = {
+            onDismiss()
+            val copied = runCatching {
+                val clipboard = checkNotNull(context.getSystemService(ClipboardManager::class.java))
+                clipboard.setPrimaryClip(ClipData.newPlainText(context.getString(R.string.agent_files_path_label), path))
+            }.isSuccess
+            if (!copied) Toast.makeText(context, R.string.agent_files_copy_path_failure, Toast.LENGTH_SHORT).show()
+        },
+    )
 }
 
 @Composable
@@ -823,24 +848,6 @@ private fun AgentFilesUpButton(onBack: () -> Unit) {
             drawLine(ink, top, Offset(size.width * .50f, size.height * .80f), stroke, StrokeCap.Round)
             drawLine(ink, top, Offset(size.width * .24f, size.height * .46f), stroke, StrokeCap.Round)
             drawLine(ink, top, Offset(size.width * .76f, size.height * .46f), stroke, StrokeCap.Round)
-        }
-    }
-}
-
-@Composable
-private fun FileTransferButton(upload: Boolean, enabled: Boolean, onClick: () -> Unit) {
-    val label = stringResource(if (upload) R.string.agent_files_upload else R.string.agent_files_download)
-    PocketIconControl(label, onClick, enabled = enabled) { ink ->
-        Canvas(Modifier.size(PocketGlyphSize)) {
-            val stroke = PocketGlyphStroke.toPx()
-            fun point(x: Float, y: Float) = Offset(size.width * x, size.height * y)
-            val tip = point(.50f, if (upload) .16f else .67f)
-            val tail = if (upload) .67f else .16f
-            val wings = if (upload) .37f else .46f
-            drawLine(ink, point(.50f, tail), tip, stroke, StrokeCap.Round)
-            drawLine(ink, point(.29f, wings), tip, stroke, StrokeCap.Round)
-            drawLine(ink, point(.71f, wings), tip, stroke, StrokeCap.Round)
-            drawLine(ink, point(.17f, .85f), point(.83f, .85f), stroke, StrokeCap.Round)
         }
     }
 }
