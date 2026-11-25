@@ -31,10 +31,13 @@
     <string name="agent_files_upload_notice">File upload in progress</string>
     <string name="agent_files_options_for">Options for %1$s</string>
     <string name="agent_files_delete">Delete file</string>
+    <string name="agent_files_remove_directory">Delete folder</string>
+    <string name="agent_files_remove_directory_warning">Only empty folders can be deleted. This removes the folder from the remote host and can’t be undone here.</string>
+    <string name="agent_files_delete_parent">Parent folder: %1$s</string>
     <string name="agent_files_delete_name">File: %1$s</string>
     <string name="agent_files_delete_folder">Folder: %1$s</string>
     <string name="agent_files_delete_warning">This removes the file from the remote host. It can’t be undone here.</string>
-    <string name="agent_files_deleting">Deleting file…</string>
+    <string name="agent_files_deleting">Deleting…</string>
     <string name="agent_files_zoom_in">Zoom in</string>
     <string name="agent_files_zoom_out">Zoom out</string>
     <string name="agent_files_zoom_fit">Fit</string>

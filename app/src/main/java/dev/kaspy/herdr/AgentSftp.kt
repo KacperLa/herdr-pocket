@@ -90,7 +90,7 @@ internal class AgentSftp(private val channel: ChannelSftp) {
             val name = entry.filename
             if (AgentFiles.entryName(name)) {
                 val attrs=entry.attrs
-                val identity=attrs.takeIf {it.isReg && !it.isLink}
+                val identity=attrs.takeIf {(it.isReg || it.isDir) && !it.isLink}
                     ?.let {SftpFileIdentity(it.size,it.getMTime())}
                 items.add(SftpRead.Entry(name, attrs.isDir, attrs.isReg && !attrs.isLink, identity))
             }
@@ -206,7 +206,7 @@ internal class AgentSftp(private val channel: ChannelSftp) {
         channel.rmdir(AgentFiles.literal(stage.directory))
     }.isSuccess
 
-    fun delete(root:String,folder:List<String>,name:String,expected:SftpFileIdentity?,
+    fun delete(root:String,folder:List<String>,name:String,expected:SftpFileIdentity?,directory:Boolean,
         stillCurrent:()->Boolean,onRemoveSent:()->Unit):SftpDelete {
         require(AgentFiles.entryName(name))
         if(!stillCurrent()) throw InterruptedIOException()
@@ -214,17 +214,29 @@ internal class AgentSftp(private val channel: ChannelSftp) {
         if(!channel.lstat(AgentFiles.literal(parent)).isDir) throw Unavailable()
         val target=AgentFiles.literal(AgentFiles.child(parent,name))
         val attributes=channel.lstat(target) // Never resolve the last component through its target.
-        if(!attributes.isReg || attributes.isLink)
-            return SftpDelete.Failure("Only regular files can be deleted. Folders and links are not deleted.")
+        val kind=if(directory) "folder" else "file"
+        if(attributes.isLink || !(if(directory) attributes.isDir else attributes.isReg))
+            return SftpDelete.Failure("The selected $kind is no longer the expected type. Links are not deleted.")
         val identity=SftpFileIdentity(attributes.size,attributes.getMTime())
         if(expected!=null && expected!=identity)
-            return SftpDelete.Failure("The file changed after it was listed. Refresh and confirm again.")
+            return SftpDelete.Failure("The $kind changed after it was listed. Refresh and confirm again.")
+        if(directory) {
+            var nonEmpty=false
+            channel.ls(target) { entry ->
+                if(entry.filename=="." || entry.filename=="..") ChannelSftp.LsEntrySelector.CONTINUE
+                else {
+                    nonEmpty=true
+                    ChannelSftp.LsEntrySelector.BREAK
+                }
+            }
+            if(nonEmpty) return SftpDelete.Failure("Only empty folders can be deleted. Move or delete its contents first.")
+        }
         if(resolve(root,folder,canonical=true).second!=parent) throw Unavailable()
         if(!stillCurrent()) throw InterruptedIOException()
         onRemoveSent()
-        // The server unlinks the exact last component without following it.
-        // SFTP cannot combine this with an atomic expected-type/inode check.
-        channel.rm(target)
+        // RMDIR is nonrecursive and fails if a file was added during preflight.
+        // Neither operation follows the final component; SFTP cannot atomically verify its inode.
+        if(directory) channel.rmdir(target) else channel.rm(target)
         return SftpDelete.Success
     }
 

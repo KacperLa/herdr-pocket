@@ -107,7 +107,7 @@ internal data class AgentFilePreview(
 )
 
 internal data class AgentFileImagePreview(val name: String, val bitmap: Bitmap)
-internal data class AgentFileDeletePrompt(val name: String, val folder: String)
+internal data class AgentFileDeletePrompt(val name: String, val folder: String, val directory: Boolean)
 internal class AgentNewFolderPrompt(val folder: String)
 
 internal data class AgentFilesUiState(
@@ -331,22 +331,28 @@ internal fun AgentFilesExplorer(
         backFocus.requestFocus()
     }
     state.deletePrompt?.let { prompt ->
+        val deleteLabel=if(prompt.directory) R.string.agent_files_remove_directory else R.string.agent_files_delete
         PocketDialog(
             onDismissRequest = { onCancelDelete(prompt) },
-            title = { Text(stringResource(R.string.agent_files_delete)) },
+            title = { Text(stringResource(deleteLabel)) },
             text = {
                 Column(
                     Modifier.heightIn(max = 300.dp).verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Text(stringResource(R.string.agent_files_delete_name, displayFileName(prompt.name)))
-                    Text(stringResource(R.string.agent_files_delete_folder, displayFileName(prompt.folder)))
-                    Text(stringResource(R.string.agent_files_delete_warning))
+                    Text(stringResource(
+                        if(prompt.directory) R.string.agent_files_delete_folder else R.string.agent_files_delete_name,
+                        displayFileName(prompt.name),
+                    ))
+                    Text(stringResource(R.string.agent_files_delete_parent, displayFileName(prompt.folder)))
+                    Text(stringResource(
+                        if(prompt.directory) R.string.agent_files_remove_directory_warning else R.string.agent_files_delete_warning,
+                    ))
                 }
             },
             confirmButton = {
                 TextButton(onClick = { onConfirmDelete(prompt) }) {
-                    Text(stringResource(R.string.agent_files_delete), color = MaterialTheme.colorScheme.error)
+                    Text(stringResource(deleteLabel), color = MaterialTheme.colorScheme.error)
                 }
             },
             dismissButton = {
@@ -506,7 +512,7 @@ internal fun AgentFilesExplorer(
                                             )
                                         }
                                     }
-                                    if (!entry.isDirectory && entry.canOpen) {
+                                    if (entry.canOpen) {
                                         Box(Modifier.padding(end = 8.dp)) {
                                             FilesEntryOptions(entry, canUseEntries) { onDeleteEntry(entry) }
                                         }
@@ -586,7 +592,9 @@ private fun FilesEntryOptions(entry: AgentFileEntry, enabled: Boolean, onDelete:
         } else Spacer(Modifier.size(48.dp))
         PocketMenu(expanded = open && enabled, onDismissRequest = { open = false }) {
             DropdownMenuItem(
-                text = { Text(stringResource(R.string.agent_files_delete)) },
+                text = { Text(stringResource(
+                    if(entry.isDirectory) R.string.agent_files_remove_directory else R.string.agent_files_delete,
+                )) },
                 onClick = { open = false; onDelete() },
             )
         }

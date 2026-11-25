@@ -18,6 +18,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -31,6 +33,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
@@ -133,6 +136,18 @@ internal fun TerminalDictationControls(
         )
         return
     }
+    dictation.startIssue?.let { issue ->
+        PocketDialog(
+            onDismissRequest = dictation::dismissStartIssue,
+            title = { Text("Dictation unavailable") },
+            text = { Text(issue) },
+            confirmButton = {
+                TextButton(onClick = dictation::dismissStartIssue) {
+                    Text(stringResource(android.R.string.ok))
+                }
+            },
+        )
+    }
     shortcuts {
         IconButton(
             onClick = { dictation.tap { permission.launch(Manifest.permission.RECORD_AUDIO) } },
@@ -168,6 +183,8 @@ private class TerminalDictation(
         private set
     var notice by mutableStateOf<String?>(null)
         private set
+    var startIssue by mutableStateOf<String?>(null)
+        private set
     var micLevels by mutableStateOf(emptyList<Float>())
         private set
     private var recognizer: SpeechRecognizer? = null
@@ -178,6 +195,10 @@ private class TerminalDictation(
     private val mainHandler = Handler(Looper.getMainLooper())
     var transcriptionTimeout = 30_000L
         private set
+
+    fun dismissStartIssue() {
+        startIssue = null
+    }
 
     fun tap(requestPermission: () -> Unit) {
         if (permissionPending) return
@@ -199,12 +220,12 @@ private class TerminalDictation(
         }
         val terminal = terminalIdentity()
         if (terminal == null) {
-            notice = "Connect to a live SSH terminal to use dictation."
+            startIssue = "Connect to a live SSH terminal to use dictation."
             return
         }
         notice = null
         if (!runCatching { SpeechRecognizer.isOnDeviceRecognitionAvailable(context) }.getOrDefault(false)) {
-            notice = "This device has no on-device speech recognition service. Herdr won’t use cloud dictation."
+            startIssue = "Android didn’t report an on-device speech recognition service. Pocket doesn’t use cloud dictation. You can use your keyboard’s voice typing instead."
             return
         }
 

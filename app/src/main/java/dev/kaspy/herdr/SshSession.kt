@@ -411,7 +411,7 @@ class SshSession(private val onEvent: (Long, Event) -> Unit) : AutoCloseable {
 
     internal fun deleteFile(
         pty:Any,root:String,folderParts:List<String>,name:String,
-        expected:SftpFileIdentity?=null,onResult:(FileRequest,SftpDelete)->Unit,
+        expected:SftpFileIdentity?=null,directory:Boolean=false,onResult:(FileRequest,SftpDelete)->Unit,
     ):FileRequest? {
         if(!AgentFiles.entryName(name)) return null
         val attempt=synchronized(lock) {
@@ -422,7 +422,8 @@ class SshSession(private val onEvent: (Long, Event) -> Unit) : AutoCloseable {
         val reported=java.util.concurrent.atomic.AtomicBoolean()
         val removeSent=java.util.concurrent.atomic.AtomicBoolean()
         fun current()=synchronized(lock) {active===attempt && !attempt.ending && attempt.channel===pty}
-        fun ambiguous()=SftpDelete.Failure("Could not confirm whether the file was deleted. Refresh the folder before trying again.")
+        val kind=if(directory) "folder" else "file"
+        fun ambiguous()=SftpDelete.Failure("Could not confirm whether the $kind was deleted. Refresh the folder before trying again.")
         return try {
             val timeout=deadline.schedule({
                 if(!request.canceled && reported.compareAndSet(false,true)) {
@@ -440,18 +441,18 @@ class SshSession(private val onEvent: (Long, Event) -> Unit) : AutoCloseable {
                             channel=attempt.session?.openChannel("sftp") as? ChannelSftp ?: throw IOException()
                             if(!request.bind(channel)) return@execute
                             channel.connect(5000)
-                            AgentSftp(channel).delete(root,path,name,expected,{!request.canceled && current()}) {
+                            AgentSftp(channel).delete(root,path,name,expected,directory,{!request.canceled && current()}) {
                                 removeSent.set(true)
                                 if(request.canceled || !current()) throw java.io.InterruptedIOException()
                             }
                         } catch(error:Exception) {
                             when {
                                 error is SftpException && error.id==ChannelSftp.SSH_FX_PERMISSION_DENIED ->
-                                    SftpDelete.Failure("You don’t have permission to delete this file.")
+                                    SftpDelete.Failure("You don’t have permission to delete this $kind.")
                                 removeSent.get() -> ambiguous()
                                 error is SftpException && error.id==ChannelSftp.SSH_FX_NO_SUCH_FILE ->
-                                    SftpDelete.Failure("The file no longer exists. Refresh the folder.")
-                                else -> SftpDelete.Failure("Could not verify the selected file for deletion. Refresh the folder.")
+                                    SftpDelete.Failure("The $kind no longer exists. Refresh the folder.")
+                                else -> SftpDelete.Failure("Could not verify the selected $kind for deletion. Refresh the folder.")
                             }
                         }
                         if(current() && !request.canceled && reported.compareAndSet(false,true)) onResult(request,result)

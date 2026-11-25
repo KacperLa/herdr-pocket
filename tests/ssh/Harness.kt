@@ -334,8 +334,8 @@ fun main() {
         check(ssh.deleteFile(newTerminal,shellRoot.path,emptyList(),literalDelete) {_,_ ->
             error("Stale PTY cannot delete")
         }==null)
-        fun remove(name:String, identity:SftpFileIdentity?=null):SftpDelete {
-            checkNotNull(ssh.deleteFile(tuiTerminal,shellRoot.path,emptyList(),name,identity) {_,result ->
+        fun remove(name:String, identity:SftpFileIdentity?=null,directory:Boolean=false):SftpDelete {
+            checkNotNull(ssh.deleteFile(tuiTerminal,shellRoot.path,emptyList(),name,identity,directory) {_,result ->
                 deletions.add(result)
             })
             return checkNotNull(deletions.poll(10,TimeUnit.SECONDS))
@@ -344,11 +344,20 @@ fun main() {
         check(remove(literalDelete,captured)===SftpDelete.Success)
         check(remove("escape-link") is SftpDelete.Failure)
         check(remove("keep-folder") is SftpDelete.Failure)
+        fun removeDirectory(name:String):SftpDelete {
+            val entry=shellFolder.entries.single {it.name==name}
+            return remove(name,entry.identity,directory=true)
+        }
+        check(removeDirectory("empty [1]*?")===SftpDelete.Success)
+        check((removeDirectory("keep-folder") as SftpDelete.Failure).message.contains("Only empty folders"))
+        check(removeDirectory("folder-link") is SftpDelete.Failure)
+        check((removeDirectory("rmdir-race") as SftpDelete.Failure).message.contains("Could not confirm"))
+
         val stale=checkNotNull(shellFolder.entries.single {it.name=="delete [1]abcX.bin"}.identity)
         check((remove("delete [1]abcX.bin",stale.copy(size=stale.size+1)) as SftpDelete.Failure).message.contains("changed"))
         check((remove("ambiguous-delete.bin") as SftpDelete.Failure).message.contains("Could not confirm"))
         check(ssh.terminalIdentity()===tuiTerminal)
-        println("Delete verified: literal regular file only, stale metadata/link/directory refused, ambiguous outcome not retried.")
+        println("Delete verified: literal regular file only, literal empty directory only, nonempty and link refused, ambiguous outcome not retried.")
         val mkdirs=LinkedBlockingQueue<SftpMkdir>()
         val literalFolder="""new [1]*? \ folder"""
         check(ssh.createFolder(newTerminal,shellRoot.path,emptyList(),literalFolder) {_,_ ->

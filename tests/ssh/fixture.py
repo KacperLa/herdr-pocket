@@ -78,6 +78,7 @@ FILES_ROOT = pathlib.Path('virtual-files').resolve()
 FILES_READY = threading.Event()
 FILES_PTY = threading.Event()
 DELETION_REQUESTS = []
+RMDIR_REQUESTS = []
 MKDIR_REQUESTS = []
 
 class SlowFixtureFile(paramiko.SFTPHandle):
@@ -173,8 +174,13 @@ class FixtureSftp(paramiko.SFTPServerInterface):
         assert self.local(path).name.startswith(".herdr-pocket-upload-") and attr.st_mode & 0o777==0o700
         return self.change(lambda: self.local(path).chmod(attr.st_mode))
     def rmdir(self,path):
-        assert self.local(path).name.startswith(".herdr-pocket-upload-")
-        return self.change(lambda: self.local(path).rmdir())
+        target=self.local(path)
+        if not target.name.startswith(".herdr-pocket-upload-"):
+            RMDIR_REQUESTS.append(target.name)
+            assert target.name in ("empty [1]*?","rmdir-race"), path
+            if target.name=="rmdir-race":
+                (target/".added").write_text("keep me")
+        return self.change(target.rmdir)
     def remove(self,path):
         target=self.local(path)
         if target.parent.name.startswith(".herdr-pocket-upload-"):
@@ -360,6 +366,10 @@ def exercise_same_transport(t, s, connection):
     assert MKDIR_REQUESTS==['new [1]*? \\ folder','mkdir-race']
     assert (dest/'keep-folder'/'new [1]*? \\ folder').is_dir()
     assert (dest/'mkdir-race').read_bytes()==b'competitor data'
+    assert RMDIR_REQUESTS==['empty [1]*?','rmdir-race']
+    assert not (dest/'empty [1]*?').exists() and (dest/'empty [1]neighbor').is_dir()
+    assert (dest/'keep-folder'/'.hidden').is_file() and (dest/'folder-link').is_symlink()
+    assert (dest/'rmdir-race'/'.added').read_text()=='keep me'
     assert DELETION_REQUESTS==['delete [1]*?.bin','ambiguous-delete.bin']
     assert not (dest/'delete [1]*?.bin').exists() and not (dest/'ambiguous-delete.bin').exists()
     assert (dest/'delete [1]abcX.bin').read_bytes()==b'neighbor'
@@ -394,6 +404,11 @@ with socket.socket(socket.AF_INET) as listener:
             (shell_path / 'delete [1]abcX.bin').write_bytes(b'neighbor')
             (shell_path / 'ambiguous-delete.bin').write_bytes(b'closed after unlink')
             (shell_path / 'keep-folder').mkdir()
+            (shell_path / 'keep-folder' / '.hidden').write_text('keep hidden')
+            (shell_path / 'empty [1]*?').mkdir()
+            (shell_path / 'empty [1]neighbor').mkdir()
+            (shell_path / 'rmdir-race').mkdir()
+            (shell_path / 'folder-link').symlink_to('keep-folder', target_is_directory=True)
             (FILES_ROOT / 'alpha' / 'a*?.txt').write_text('agent text ✓', encoding='utf-8')
             (FILES_ROOT / 'beta' / 'other.txt').write_text('other agent', encoding='utf-8')
             (FILES_ROOT / 'alpha' / 'other-link').symlink_to('../beta/other.txt')

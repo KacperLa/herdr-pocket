@@ -1300,8 +1300,8 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         val folder=ui.folder ?: return
         if(!currentFilesRoute(route) || ui.loading || ui.error!=null || ui.uploading || ui.downloading ||
             ui.deleting || pendingFilesDelete!=null || pendingFilesMkdir!=null || downloadableFile!=null ||
-            entry !in ui.entries || entry.isDirectory || !entry.canOpen) return
-        val prompt=AgentFileDeletePrompt(entry.name,folder)
+            entry !in ui.entries || !entry.canOpen) return
+        val prompt=AgentFileDeletePrompt(entry.name,folder,entry.isDirectory)
         pendingFilesDelete=FilesDelete(route,FilesUploadAnchor(root.path,filesFolder.toList(),folder),entry,prompt)
         filesUi=ui.copy(deletePrompt=prompt,deleteMessage=null,folderMessage=null,uploadMessage=null)
     }
@@ -1323,7 +1323,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         }
         filesUi=ui.copy(deletePrompt=null,deleting=true,deleteMessage=null)
         filesDeleteRequest=ssh.deleteFile(target.route.pty,target.anchor.root,target.anchor.parts,target.entry.name,
-            expected=target.entry.identity) { request,result ->
+            expected=target.entry.identity,directory=target.entry.isDirectory) { request,result ->
             main.post {
                 if(filesDeleteRequest!==request || pendingFilesDelete!==target ||
                     !currentFilesRoute(target.route) ||
@@ -1332,7 +1332,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                 pendingFilesDelete=null
                 when(result) {
                     SftpDelete.Success -> {
-                        filesUi=filesUi?.copy(deleting=false,deleteMessage="File deleted.")
+                        filesUi=filesUi?.copy(deleting=false,deleteMessage=if(target.entry.isDirectory) "Folder deleted." else "File deleted.")
                         fetchFiles(FilesRead(target.anchor.parts))
                     }
                     is SftpDelete.Failure -> filesUi=filesUi?.copy(deleting=false,deleteMessage=result.message)
