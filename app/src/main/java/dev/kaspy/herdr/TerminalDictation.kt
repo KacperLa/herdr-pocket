@@ -51,6 +51,7 @@ internal fun TerminalDictationControls(
     terminalIdentity: () -> Any?,
     send: (Any, String, () -> Boolean, (Boolean) -> Unit) -> Boolean,
     onExclusiveDock: () -> Unit,
+    buttonEnabled: Boolean = true,
     shortcuts: @Composable (@Composable () -> Unit) -> Unit,
 ) {
     val context = LocalContext.current
@@ -151,7 +152,7 @@ internal fun TerminalDictationControls(
     shortcuts {
         IconButton(
             onClick = { dictation.tap { permission.launch(Manifest.permission.RECORD_AUDIO) } },
-            enabled = !dictation.permissionPending,
+            enabled = buttonEnabled && !dictation.permissionPending,
             modifier = Modifier.size(DockTargetSize).semantics {
                 contentDescription = description
                 stateDescription = message
@@ -161,7 +162,7 @@ internal fun TerminalDictationControls(
                 containerColor = Color.Transparent, contentColor = Color.White,
             ),
         ) {
-            val color = if (dictation.permissionPending) Color.White.copy(alpha = .38f) else Color.White
+            val color = if (!buttonEnabled || dictation.permissionPending) Color.White.copy(alpha = .38f) else Color.White
             Icon(painterResource(R.drawable.ic_terminal_mic),contentDescription=null,
                 tint=color,modifier=Modifier.size(DockGlyphSize))
         }

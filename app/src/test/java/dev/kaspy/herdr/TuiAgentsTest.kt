@@ -318,6 +318,19 @@ class TuiAgentsTest {
         assertEquals(listOf("a","b","c"),space.rows.map {it.address})
     }
 
+    @Test fun hostTabNameLabelsAnUnnamedAgentWithoutOverwritingRegisteredAgentName() {
+        fun agent(tab:String, name:String="")=TuiAgents.parse("""{"result":{"type":"session_snapshot","snapshot":{
+          "workspaces":[{"workspace_id":"w","label":"Projects","custom_label":false}],
+          "tabs":[{"workspace_id":"w","tab_id":"t9","label":"$tab"}],
+          "panes":[{"workspace_id":"w","tab_id":"t9","pane_id":"p","terminal_id":"agent"}],
+          "agents":[{"workspace_id":"w","tab_id":"t9","pane_id":"p","terminal_id":"agent","agent":"codex"$name}]
+        }}}""").single()
+        assertEquals("Review changes",agent("Review changes").name)
+        val named=agent("Review changes",""", "name":"reviewer"""")
+        assertEquals("reviewer",named.name)
+        assertEquals("Review changes",named.rosterPlacement?.tabLabel)
+    }
+
     @Test fun unnamedFirstTabKeepsTheSameSpacesLabelWhenAnotherTabIsAdded() {
         fun label(withSecondTab:Boolean, firstLabel:String=""):String? {
             val first="""{"workspace_id":"w","tab_id":"t9"$firstLabel}"""

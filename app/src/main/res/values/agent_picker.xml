@@ -5,6 +5,7 @@
     <string name="agent_status_idle">Idle</string>
     <string name="agent_status_done">Done</string>
     <string name="agent_status_unknown">Status unknown</string>
+    <string name="terminal_opening">Opening terminal</string>
     <string name="terminal_reconnecting">Reconnecting…</string>
     <string name="agent_roster_list">Agent and terminal list</string>
     <string name="agent_roster_refresh">Refresh agents and terminals</string>

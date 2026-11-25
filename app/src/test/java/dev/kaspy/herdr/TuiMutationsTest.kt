@@ -21,6 +21,22 @@ class TuiMutationsTest {
         assertFalse(TuiMutations.confirmsPane("not JSON",loc))
     }
 
+    @Test fun tabRenameChecksThePaneThenConfirmsOnlyTheSameTabsHostLabel() {
+        val target=TuiMutations.RenameTarget.TAB
+        val before=response("pane_info","pane","""{$fields}""")
+        assertTrue(TuiMutations.confirmsTarget(before,loc,target))
+        assertFalse(TuiMutations.confirmsTarget(before,loc.copy(tabId="w1:t4"),target))
+        val tab=response("tab_info","tab","""{"tab_id":"w1:t3","workspace_id":"w1","label":"New tab name"}""")
+        assertTrue(TuiMutations.confirmsTarget(tab,loc,target,"New tab name"))
+        assertFalse(TuiMutations.confirmsTarget(tab,loc.copy(workspaceId="w9"),target,"New tab name"))
+        assertFalse(TuiMutations.confirmsTarget(tab,loc.copy(tabId="w1:t4"),target,"New tab name"))
+        assertFalse(TuiMutations.confirmsTarget(tab,loc,target,"Old name"))
+        assertFalse(TuiMutations.confirmsTarget(before,loc,target,"New tab name"))
+        assertFalse(TuiMutations.confirmsTarget(tab,loc,TuiMutations.RenameTarget.AGENT,"New tab name"))
+        assertTrue(TuiMutations.canRenameTarget("New tab name",target))
+        assertFalse(TuiMutations.canRenameTarget("New tab name",TuiMutations.RenameTarget.AGENT))
+    }
+
     @Test fun agentRenameRequiresTheExactAgentNameFieldAndRoute() {
         val renamed=response("agent_info","agent","""{$fields,"name":"release-reviewer","agent":"codex"}""")
         assertTrue(TuiMutations.confirmsRenameTarget(renamed,loc,true))

@@ -137,8 +137,8 @@ internal data class AgentFilesUiState(
 )
 
 @Composable
-internal fun AgentActionsMenu(buttonSize: Dp, onOpenMenu: () -> Unit) {
-    OverflowDotsButton(buttonSize, stringResource(R.string.agent_actions_menu), onOpenMenu)
+internal fun AgentActionsMenu(buttonSize: Dp, onOpenMenu: () -> Unit, enabled: Boolean = true) {
+    OverflowDotsButton(buttonSize, stringResource(R.string.agent_actions_menu), onOpenMenu, enabled)
 }
 
 @Composable
@@ -230,6 +230,10 @@ internal fun AgentMenuScreen(
                     details?.let {stringResource(R.string.roster_row_terminal)}
                 Surface(Modifier.fillMaxWidth(),shape=PocketPanelShape,color=PocketBlack,border=BorderStroke(1.dp,PocketOutline)) {
                     Column(Modifier.padding(horizontal=16.dp)) {
+                        details?.rosterPlacement?.tabLabel?.let {
+                            AgentSettingDetail(R.string.agent_settings_tab_label,it)
+                            HorizontalDivider()
+                        }
                         AgentSettingDetail(R.string.agent_settings_type,type ?: empty)
                         HorizontalDivider()
                         AgentSettingDetail(R.string.agent_settings_description,summary?.description ?: empty)

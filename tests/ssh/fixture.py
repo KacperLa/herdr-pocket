@@ -11,6 +11,7 @@ TUI_BUSY_SUFFIX = """exec "$herdr_bin" --session 'office' terminal attach 'term_
 TUI_FAST_SUFFIX = """exec "$herdr_bin" --session 'office' terminal attach 'term_fast'"""
 TUI_GET_EXISTING = """exec "$herdr_bin" --session 'office' pane get 'w1:p1'"""
 TUI_RENAME = """exec "$herdr_bin" --session 'office' pane rename 'w1:p1' 'Jetson AI 2'"""
+TUI_RENAME_TAB = """exec "$herdr_bin" --session 'office' tab rename 'w1:t1' 'Review tab'"""
 TUI_CREATE_TAB = """exec "$herdr_bin" --session 'office' tab create --workspace 'w1' --no-focus"""
 TUI_GET_NEW = """exec "$herdr_bin" --session 'office' pane get 'w1:p2'"""
 CORE_CREATE_SHELL = """exec "$hc_bin" run --bg --json --no-parent --name 'shell-fixture'"""
@@ -259,6 +260,8 @@ def exercise_same_transport(t, s, connection):
     for command,result in [
         (TUI_GET_EXISTING, {'type':'pane_info','pane':existing}),
         (TUI_RENAME, {'type':'pane_info','pane':dict(existing,label='Jetson AI 2')}),
+        (TUI_GET_EXISTING, {'type':'pane_info','pane':existing}),
+        (TUI_RENAME_TAB, {'type':'tab_info','tab':{'workspace_id':'w1','tab_id':'w1:t1','label':'Review tab'}}),
         (TUI_CREATE_TAB, {'type':'tab_created','tab':{'workspace_id':'w1','tab_id':'w1:t2'},'root_pane':fresh}),
         (TUI_GET_NEW, {'type':'pane_info','pane':fresh}),
     ]:
@@ -385,7 +388,7 @@ with socket.socket(socket.AF_INET) as listener:
     listener.settimeout(25)
     pathlib.Path('fixture-info').write_text(f'{listener.getsockname()[1]}\n{pin}\n')
     events = []
-    for index in range(11):
+    for index in range(12):
         connection, _ = listener.accept()
         s = Server()
         t = paramiko.Transport(connection)
@@ -424,6 +427,18 @@ with socket.socket(socket.AF_INET) as listener:
                 assert resumed.recv(100) == b'exit resumed'
                 resumed.send_exit_status(0)
                 resumed.close()
+                continue
+            if index == 11:
+                # No PTY command until explicitly requested by the client.
+                listing = expect_channel(t, s, LIST_SUFFIX)
+                listing.sendall(b'{"terminals":[{"address":"box/t4","name":"fixture","state":"live","agent":"bash"}],"hidden_finished":0}')
+                listing.send_exit_status(0)
+                listing.close()
+                first = expect_channel(t, s, SECOND_SUFFIX)
+                first.sendall(b'first pane on existing transport')
+                assert first.recv(100) == b'exit first'
+                first.send_exit_status(0)
+                first.close()
                 continue
             ch = t.accept(6)
             if ch is not None:
@@ -490,9 +505,13 @@ with socket.socket(socket.AF_INET) as listener:
         ['none', 'fixture'], ['publickey', 'fixture'], ['publickey', 'fixture']
     ]
     commands = [entry for entry in events[9] if entry[0] == 'exec']
-    wanted = [ATTACH_SUFFIX, LIST_SUFFIX, FAIL_SUFFIX, CORE_CREATE_SHELL, LIST_SUFFIX, TUI_LIST_SUFFIX, TUI_BUSY_SUFFIX, TUI_GET_EXISTING, TUI_RENAME, TUI_CREATE_TAB, TUI_GET_NEW,
+    wanted = [ATTACH_SUFFIX, LIST_SUFFIX, FAIL_SUFFIX, CORE_CREATE_SHELL, LIST_SUFFIX, TUI_LIST_SUFFIX, TUI_BUSY_SUFFIX, TUI_GET_EXISTING, TUI_RENAME, TUI_GET_EXISTING, TUI_RENAME_TAB, TUI_CREATE_TAB, TUI_GET_NEW,
               LIST_SUFFIX, SECOND_SUFFIX, TUI_FAST_SUFFIX, TUI_LIST_SUFFIX]
     assert len(commands) == len(wanted)
     for entry, suffix in zip(commands, wanted):
         assert_resolved_command([entry], suffix)
     assert len([entry for entry in events[9] if entry[0] == 'pty']) == 5
+    assert [entry for entry in events[11] if entry[0] in ('none', 'publickey', 'password')] == [
+        ['none', 'fixture'], ['publickey', 'fixture'], ['publickey', 'fixture']
+    ]
+    assert len([entry for entry in events[11] if entry[0] == 'pty']) == 1

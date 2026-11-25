@@ -165,6 +165,10 @@ fun main() {
         val existing=checkNotNull(tuiAgent.tuiLocation)
         check(TuiMutations.confirmsPane(rpc(TuiMutations.inspectPane(existing,"office")),existing))
         check(TuiMutations.confirmsPane(rpc(TuiMutations.renamePane(existing,"Jetson AI 2","office")),existing,"Jetson AI 2"))
+        val tabTarget=TuiMutations.RenameTarget.TAB
+        check(TuiMutations.confirmsTarget(rpc(TuiMutations.inspectTarget(existing,tabTarget,"office")),existing,tabTarget))
+        check(TuiMutations.confirmsTarget(
+            rpc(TuiMutations.renameTarget(existing,tabTarget,"Review tab","office")),existing,tabTarget,"Review tab"))
         val fresh=checkNotNull(TuiMutations.newShellPane(rpc(TuiMutations.createShellTab(existing.workspaceId,"office")),existing.workspaceId))
         check(fresh.terminalId!=existing.terminalId && fresh.paneId!=existing.paneId)
         check(TuiMutations.confirmsPane(rpc(TuiMutations.inspectPane(fresh,"office")),fresh))
@@ -390,6 +394,23 @@ fun main() {
         awaitReady("resumed last target")
         check(ssh.send("exit resumed".toByteArray()))
         check(event() == SshSession.Event.Closed(0))
+        val idle = checkNotNull(ssh.connect(config, File("local-client").readBytes(), passphrase(), "unused",
+            pty = false, transportOnly = true))
+        check(event() == SshSession.Event.TransportReady)
+        check(ssh.hasIdleTransport() && ssh.terminalIdentity() == null)
+        check(!ssh.send("no pane yet".toByteArray()))
+        val roster = checkNotNull(ssh.listOnTransport(cmd))
+        val rosterReply = event() as SshSession.Event.OperationList
+        check(rosterReply.id == roster && rosterReply.exitStatus == 0 && ssh.isCurrent(idle))
+        check(CoreSessions.parse(rosterReply.stdout.toString(Charsets.UTF_8)).single().address == selected)
+        check(ssh.hasIdleTransport() && ssh.terminalIdentity() == null)
+        val first = checkNotNull(ssh.switchPty(AgentBackend.CORE.switchCommand(selected,null)))
+        check(event() == SshSession.Event.OperationSwitched(first))
+        check(ssh.isCurrent(idle) && !ssh.hasIdleTransport() && ssh.terminalIdentity() != null)
+        expectText("first pane on existing transport")
+        check(ssh.send("exit first".toByteArray()))
+        check(event() == SshSession.Event.Closed(0))
     }
+    println("Cold roster and first PTY reused one pinned SSH connection.")
     println("Loopback SSH integration: unknown/wrong rejected, encrypted Ed25519 key, non-PTY listing/isolated stderr and output/timeout bounds, bidirectional PTY, resize, exit, abrupt transport loss versus channel close, same-transport switch and resize, TUI discovery/occupied-terminal refusal without takeover, negotiated SGR wheel/click and disable, and explicit reattach passed.")
 }

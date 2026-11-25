@@ -69,6 +69,7 @@ internal fun TerminalDock(
     m:PocketModel,
     keyboardShownOrRequested:Boolean,
     inputEnabled:Boolean,
+    opening:Boolean=false,
     onToggleKeyboard:()->Unit,
     ctrlSelected:Boolean,
     altSelected:Boolean,
@@ -85,7 +86,7 @@ internal fun TerminalDock(
     fun canSend()=active && m.speechTerminalIdentity()===terminalIdentity
     BackHandler(enabled=directionsExpanded) { directionsExpanded=false }
     TerminalDictationControls(enabled=inputEnabled && m.dictationEnabled,terminalIdentity=m::speechTerminalIdentity,send=m::sendDictation,
-        onExclusiveDock={directionsExpanded=false}) { mic ->
+        onExclusiveDock={directionsExpanded=false},buttonEnabled=!opening) { mic ->
         Surface(
             modifier=Modifier.fillMaxWidth().padding(horizontal=8.dp,vertical=5.dp),
             shape=CircleShape,

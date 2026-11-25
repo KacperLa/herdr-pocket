@@ -101,7 +101,7 @@ import androidx.compose.ui.unit.sp
 
     var menuOpen by remember(session.address,enabled) { mutableStateOf(false) }
     val canOpenMenu=agentCard && (onRename!=null || onTogglePin!=null)
-    val renameResource=if(session.isAgent) R.string.roster_row_rename_agent else R.string.roster_row_rename
+    val renameResource=R.string.agent_settings_edit_name
     val menuLabel=when {
         canOpenMenu -> stringResource(R.string.roster_agent_options)
         onRename!=null -> stringResource(renameResource)
