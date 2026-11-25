@@ -4,6 +4,7 @@ host = paramiko.Ed25519Key.from_private_key_file('local-host')
 client = paramiko.Ed25519Key.from_private_key_file('local-client', password=os.environ['HERDR_FIXTURE_KEY_PASSPHRASE'])
 pin = 'SHA256:' + base64.b64encode(hashlib.sha256(host.asbytes()).digest()).decode().rstrip('=')
 LIST_SUFFIX = 'exec "$hc_bin" ls --json'
+CODEX_EXCHANGE_SUFFIX = 'exec codex app-server --listen stdio://'
 SECOND_SUFFIX = """exec "$hc_bin" attach -- 'box/t4'"""
 FAIL_SUFFIX = """exec "$hc_bin" attach -- 'box/bad'"""
 TUI_LIST_SUFFIX = "herdr_tui_roster"
@@ -219,7 +220,7 @@ def exercise_same_transport(t, s, connection):
     listing.send_exit_status(0)
     listing.close()
 
-    exchange = expect_channel(t, s, 'exec codex app-server --listen stdio://')
+    exchange = expect_channel(t, s, CODEX_EXCHANGE_SUFFIX)
     assert exchange.recv(100) == b'{"id":2}\n'
     exchange.sendall(b'{"method":"notice"}\n{"id":2,')
     time.sleep(.1)
@@ -529,7 +530,7 @@ with socket.socket(socket.AF_INET) as listener:
         ['none', 'fixture'], ['publickey', 'fixture'], ['publickey', 'fixture']
     ]
     commands = [entry for entry in events[9] if entry[0] == 'exec']
-    wanted = [ATTACH_SUFFIX, LIST_SUFFIX, FAIL_SUFFIX, CORE_CREATE_SHELL, LIST_SUFFIX, TUI_LIST_SUFFIX, TUI_BUSY_SUFFIX, TUI_GET_EXISTING, TUI_RENAME, TUI_GET_EXISTING, TUI_RENAME_TAB, TUI_CREATE_TAB, TUI_GET_NEW,
+    wanted = [ATTACH_SUFFIX, LIST_SUFFIX, CODEX_EXCHANGE_SUFFIX, FAIL_SUFFIX, CORE_CREATE_SHELL, LIST_SUFFIX, TUI_LIST_SUFFIX, TUI_BUSY_SUFFIX, TUI_GET_EXISTING, TUI_RENAME, TUI_GET_EXISTING, TUI_RENAME_TAB, TUI_CREATE_TAB, TUI_GET_NEW,
               LIST_SUFFIX, SECOND_SUFFIX, TUI_FAST_SUFFIX, TUI_LIST_SUFFIX]
     assert len(commands) == len(wanted)
     for entry, suffix in zip(commands, wanted):
