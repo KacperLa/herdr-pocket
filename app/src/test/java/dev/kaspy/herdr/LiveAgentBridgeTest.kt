@@ -93,6 +93,50 @@ class LiveAgentBridgeTest {
         assertTrue(commands.none { "agent prompt" in it || "send-keys" in it })
     }
 
+    @Test fun codexScrolledEmptyComposerDoesNotClassifyOlderTroubleshootingAsPending()=runBlocking {
+        val snapshot="""
+            API authentication was accepted.
+            If this still fails, send me the exact app error.
+
+                           ↓ Back to bottom · esc
+
+            › Ask Codex to do anything
+
+            GPT-6-Astra medium · ~/example · Manage local models
+            Earlier messages available.  enter/esc latest             ⚠ 2 warnings · f2 to
+        """.trimIndent()
+        val idle=LiveAgentHerdr.status(status("idle",10),selected)!!
+        val extractor=LiveTurnExtraction { _,_->error("This recognized idle layout must not be sent for classification") }
+        val capture=LiveAgentHerdr.Capture(idle,snapshot)
+        assertTrue(LiveAgentHerdr.codexScrolledEmptyComposer(capture))
+        assertEquals(LiveTurnExtraction.Kind.NONE,LiveAgentHerdr.preflight(capture,extractor).kind)
+        val (route,commands)=fixture(status("idle",10),text(snapshot),status("idle",10),
+            status("idle",10,"agent_prompted"))
+        assertEquals(true,route.submit(capture,"Check this example"))
+        assertEquals(1,commands.count {"agent prompt" in it})
+        assertTrue(commands.none {"send-keys" in it})
+    }
+
+    @Test fun activeMenuBlockedAgentAndUnknownEditorStillUseExtractor()=runBlocking {
+        val snapshot="↓ Back to bottom · esc\n› Ask Codex to do anything\n" +
+            "GPT-6-Astra medium · ~/example · Project\nEarlier messages available. enter/esc latest"
+        val idle=LiveAgentHerdr.status(status("idle",10),selected)!!
+        val nearMatches=listOf(
+            LiveAgentHerdr.Capture(idle,snapshot+"\nDo you want to proceed?\nAllow once"),
+            LiveAgentHerdr.Capture(idle.copy(state="blocked"),snapshot),
+            LiveAgentHerdr.Capture(idle,snapshot.replace("Ask Codex to do anything","My unfinished input")),
+            LiveAgentHerdr.Capture(idle,snapshot.replace("Earlier messages available. enter/esc latest","")),
+            LiveAgentHerdr.Capture(idle.copy(instance=idle.instance.copy(kind="claude")),snapshot),
+        )
+        for(capture in nearMatches) {
+            var calls=0
+            val extractor=LiveTurnExtraction { _,_->calls++; org.json.JSONObject("""{"kind":"unknown"}""") }
+            assertFalse(LiveAgentHerdr.codexScrolledEmptyComposer(capture))
+            assertEquals(LiveTurnExtraction.Kind.UNKNOWN,LiveAgentHerdr.preflight(capture,extractor).kind)
+            assertEquals(1,calls)
+        }
+    }
+
     @Test fun outputsAreUtf8BoundedAndTranscriptMetadataIsNotACommand() {
         val b=LiveVoiceTranscript()
         b.add(LiveVoiceProtocol.Event.InputTranscript("one","Check",100,200))

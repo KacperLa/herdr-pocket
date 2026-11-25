@@ -53,6 +53,26 @@ internal object LiveAgentHerdr {
         """(?i)\[(?:y/n|y/N)\]|approve (?:this|once|always)|allow (?:once|always|this command)|do you want to proceed|esc to cancel|enter to (?:select|confirm)|use arrow keys""")
     fun mayHaveActiveMenu(text:String)=visibleMenu.containsMatchIn(text.lines().takeLast(12).joinToString("\n"))
 
+    // Exact Codex scrollback/composer chrome. An unknown or partially rendered tail
+    // still goes through the question detector; this never authorizes terminal input.
+    private val codexFooter=Regex("""GPT-[^·]{1,100} · (?:~/|/)[^·]+(?: · .*)?""")
+    fun codexScrolledEmptyComposer(capture:Capture):Boolean {
+        if(capture.status.state!="idle" || !capture.status.instance.kind.equals("codex",true) ||
+            mayHaveActiveMenu(capture.screen)) return false
+        val tail=capture.screen.lineSequence().map(String::trim).filter(String::isNotEmpty).toList().takeLast(4)
+        return tail.size==4 &&
+            tail[0]=="↓ Back to bottom · esc" &&
+            tail[1]=="› Ask Codex to do anything" &&
+            codexFooter.matches(tail[2]) &&
+            tail[3].startsWith("Earlier messages available.") &&
+            tail[3].substringAfter("Earlier messages available.").trim().startsWith("enter/esc latest")
+    }
+
+    suspend fun preflight(capture:Capture,extractor:LiveTurnExtraction):LiveTurnExtraction.Observation =
+        if(codexScrolledEmptyComposer(capture)) LiveTurnExtraction.Observation(LiveTurnExtraction.Kind.NONE)
+        else extractor.inspect(capture.screen,capture.screen,"",false)
+
+
     /**
      * Orchrd waits for new work plus a settled, current capture. We do not run its extra
      * intent-model pass: propose only a grounded new suffix, then require local review.

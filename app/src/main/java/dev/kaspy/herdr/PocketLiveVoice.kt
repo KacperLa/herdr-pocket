@@ -324,9 +324,10 @@ internal class PocketLiveVoice(
                             say(active,event.id,"The agent is busy, blocked, changed, or its screen could not be verified. Pocket did not send anything. Check the terminal.")
                             return@launch
                         }
-                        val check=active.extractor.inspect(before.screen,before.screen,"",false)
+                        val knownComposer=LiveAgentHerdr.codexScrolledEmptyComposer(before)
+                        val check=LiveAgentHerdr.preflight(before,active.extractor)
                         val menu=LiveAgentHerdr.mayHaveActiveMenu(before.screen)
-                        diagnostics.preflight(LiveDiagnostics.agentState(before.status.state),check.kind,menu,check.problem)
+                        diagnostics.preflight(LiveDiagnostics.agentState(before.status.state),check.kind,menu,check.problem,knownComposer)
                         if(check.kind!=LiveTurnExtraction.Kind.NONE || !before.status.ready || menu) {
                             val question=check.draft
                             val speech=if(check.kind==LiveTurnExtraction.Kind.QUESTION && question!=null &&

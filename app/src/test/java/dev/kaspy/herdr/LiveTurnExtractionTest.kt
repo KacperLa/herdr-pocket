@@ -69,6 +69,20 @@ class LiveTurnExtractionTest {
         }
     }
 
+    @Test fun readinessAndQuestionExtractionIgnoreInputBoxContent()=runBlocking {
+        var passes=0
+        val extractor=LiveTurnExtraction { instructions,_ ->
+            assertTrue(instructions.contains("Ignore all input boxes"))
+            assertTrue(instructions.contains("typed drafts"))
+            assertTrue(instructions.contains("separate, visible question"))
+            org.json.JSONObject(if(passes++==0) """{"kind":"question"}"""
+                else """{"question":"Select an agent mode?","choices":["Review","Cancel"]}""")
+        }
+        val report=extractor.inspect("","Select an agent mode?\nReview\nCancel\n› Is this a draft?","",false)
+        assertEquals("Select an agent mode?\n1. Review\n2. Cancel",report.draft)
+        assertEquals(2,passes)
+    }
+
     @Test fun unreadableResponseDoesNotBecomeAResult()=runBlocking {
         val extractor=LiveTurnExtraction { _,_-> null }
         assertEquals(LiveTurnExtraction.Kind.UNKNOWN,extractor.inspect("before","after","prompt",true).kind)

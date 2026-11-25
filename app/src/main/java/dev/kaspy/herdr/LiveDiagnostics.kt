@@ -36,8 +36,11 @@ internal class LiveDiagnostics(private val clock:()->Long={System.nanoTime()/1_0
     @Synchronized fun call(profile:LiveVoiceProfile,disableThinking:Boolean)=
         append(Event.CALL_START.label(),"profile="+profile.label(),"thinking_off_requested=$disableThinking")
 
-    @Synchronized fun preflight(state:AgentState,kind:LiveTurnExtraction.Kind,menu:Boolean,problem:LiveExtractionClient.Problem?) =
-        append(Event.PREFLIGHT.label(),"herdr="+state.label(),"classification="+kind.label(),"menu=$menu",
+    @Synchronized fun preflight(
+        state:AgentState,kind:LiveTurnExtraction.Kind,menu:Boolean,problem:LiveExtractionClient.Problem?,
+        knownComposer:Boolean=false,
+    )=append(Event.PREFLIGHT.label(),"herdr="+state.label(),"classification="+kind.label(),"menu=$menu",
+            "source="+if(knownComposer) "codex_idle_composer" else "extractor",
             problem?.let {"problem="+it.label()})
 
     @Synchronized fun extraction(
