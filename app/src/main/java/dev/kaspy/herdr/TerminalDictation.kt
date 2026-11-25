@@ -64,7 +64,8 @@ import java.util.Locale
 internal fun TerminalDictationControls(
     enabled: Boolean,
     terminalIdentity: () -> Any?,
-    send: (Any, String, () -> Boolean, (Boolean) -> Unit) -> Boolean,
+    send: (Any, String, Boolean, () -> Boolean, (Boolean) -> Unit) -> Boolean,
+    pressEnter: Boolean,
     onExclusiveDock: () -> Unit,
     buttonEnabled: Boolean = true,
     shortcuts: @Composable (@Composable () -> Unit) -> Unit,
@@ -73,10 +74,11 @@ internal fun TerminalDictationControls(
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val currentTerminal by rememberUpdatedState({ if (enabled) terminalIdentity() else null })
     val currentSend by rememberUpdatedState(send)
+    val currentPressEnter by rememberUpdatedState(pressEnter)
     val dictation = remember(context, lifecycle) {
-        TerminalDictation(context, { currentTerminal() }, {
+        TerminalDictation(context, { currentTerminal() }, { currentPressEnter }, {
             lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
-        }) { terminal, text, allowed, completed -> currentSend(terminal, text, allowed, completed) }
+        }) { terminal, text, enter, allowed, completed -> currentSend(terminal, text, enter, allowed, completed) }
     }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         dictation.permissionResult(it)
@@ -126,8 +128,10 @@ internal fun TerminalDictationControls(
         dictation.timedOut(take, phase)
     }
 
+    val enterForTake = take?.pressEnter ?: pressEnter
     val description = when (phase) {
-        DictationPhase.RECORDING, DictationPhase.CAPTURED -> "Stop recording, transcribe, and send with Enter"
+        DictationPhase.RECORDING, DictationPhase.CAPTURED -> if (enterForTake) "Stop recording, transcribe, and send with Enter"
+            else "Stop recording and insert transcript without Enter"
         DictationPhase.PERMISSION -> "Waiting for microphone permission"
         null -> stringResource(R.string.dictation_mic_start)
         else -> "Cancel terminal dictation"
@@ -136,10 +140,10 @@ internal fun TerminalDictationControls(
         DictationPhase.PERMISSION -> "Waiting for microphone permission."
         DictationPhase.WAITING_FOR_RESUME -> "Waiting for the terminal to return to the foreground."
         DictationPhase.STARTING -> "Starting the microphone."
-        DictationPhase.RECORDING -> if (take?.holdToTalk == true) "Recording. Release the mic to transcribe and send."
-            else "Recording. Pauses are OK. Tap again to transcribe and send."
+        DictationPhase.RECORDING -> if (take?.holdToTalk == true) "Recording. Release the mic to finish."
+            else "Recording. Pauses are OK. Tap again to finish."
         DictationPhase.STOPPING -> "Stopping the microphone."
-        DictationPhase.CAPTURED -> "Recording reached its five-minute limit. Tap to transcribe and send."
+        DictationPhase.CAPTURED -> "Recording reached its five-minute limit. Tap to finish dictation."
         DictationPhase.TRANSCRIBING -> "Transcribing with Android’s selected speech service."
         DictationPhase.RETRYING -> "Retrying the same recording with Android’s speech service."
         DictationPhase.SUBMITTING -> "Submitting recognized text to the active terminal."
@@ -200,6 +204,7 @@ internal fun TerminalDictationControls(
             DictationDock(
                 phase = phase,
                 held = take?.holdToTalk == true,
+                pressEnter = enterForTake,
                 levels = { dictation.micLevels },
                 onCancel = dictation::discardFromDock,
                 onStop = { dictation.tap {} },
@@ -260,8 +265,9 @@ private suspend fun AwaitPointerEventScope.waitForDictationUp(
 private class TerminalDictation(
     private val context: Context,
     private val terminalIdentity: () -> Any?,
+    private val pressEnter: () -> Boolean,
     private val resumed: () -> Boolean,
-    private val send: (Any, String, () -> Boolean, (Boolean) -> Unit) -> Boolean,
+    private val send: (Any, String, Boolean, () -> Boolean, (Boolean) -> Unit) -> Boolean,
 ) {
     var take by mutableStateOf<TerminalDictationTicket?>(null)
         private set
@@ -349,7 +355,7 @@ private class TerminalDictation(
             return null
         }
         val granted = hasMicPermission()
-        val ticket = if (!hold || granted) TerminalDictationTicket(terminal, granted, hold) else null
+        val ticket = if (!hold || granted) TerminalDictationTicket(terminal, granted, hold, pressEnter()) else null
         take = ticket
         if (granted) {
             phase = DictationPhase.WAITING_FOR_RESUME
@@ -424,8 +430,8 @@ private class TerminalDictation(
             } else if (capped && phase == DictationPhase.RECORDING) {
                 captured = pcm
                 phase = DictationPhase.CAPTURED
-                toast(if (ticket.holdToTalk) "Five-minute recording limit reached. Release to transcribe and send."
-                    else "Five-minute recording limit reached. Tap the stop button to transcribe and send.")
+                toast(if (ticket.holdToTalk) "Five-minute recording limit reached. Release to finish dictation."
+                    else "Five-minute recording limit reached. Tap the stop button to finish dictation.")
             } else {
                 pcm.close()
                 cancel("Recording stopped unexpectedly. Nothing was sent.", showToast = true)
@@ -612,11 +618,13 @@ private class TerminalDictation(
             if (take !== ticket || phase != DictationPhase.SUBMITTING) return
             take = null
             phase = null
-            notice = if (accepted) "Dictation submitted with Enter."
+            notice = if (accepted) {
+                if (ticket.pressEnter) "Dictation submitted with Enter." else "Transcript inserted without pressing Enter."
+            }
                 else "Could not submit dictation to the active terminal."
             if (!accepted) toast(checkNotNull(notice))
         }
-        val posted = runCatching { send(ticket.terminal, text, ::stillAllowed, ::complete) }.getOrDefault(false)
+        val posted = runCatching { send(ticket.terminal, text, ticket.pressEnter, ::stillAllowed, ::complete) }.getOrDefault(false)
         if (!posted) complete(false)
     }
 

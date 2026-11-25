@@ -27,11 +27,13 @@ import kotlin.math.floor
 internal fun DictationDock(
     phase: DictationPhase,
     held: Boolean,
+    pressEnter: Boolean,
     levels: () -> List<Float>,
     onCancel: () -> Unit,
     onStop: () -> Unit,
 ) {
     val processing = phase.showsTranscribing
+    val releaseLabel = if (pressEnter) R.string.dictation_hold_release else R.string.dictation_hold_insert
     Surface(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 5.dp),
         color = PocketSelected,
@@ -55,7 +57,7 @@ internal fun DictationDock(
             if (processing || phase == DictationPhase.CAPTURED || phase == DictationPhase.STARTING) {
                 val label = stringResource(when {
                     processing -> R.string.dictation_transcribing
-                    phase == DictationPhase.CAPTURED -> if (held) R.string.dictation_hold_release else R.string.dictation_recording_ready
+                    phase == DictationPhase.CAPTURED -> if (held) releaseLabel else if (pressEnter) R.string.dictation_recording_ready else R.string.dictation_ready_to_insert
                     else -> R.string.dictation_starting
                 })
                 Text(
@@ -64,7 +66,7 @@ internal fun DictationDock(
                 )
             } else {
                 // Tap mode gets a stable recording message from the stop button.
-                val heldDescription = if (held) stringResource(R.string.dictation_hold_release) else null
+                val heldDescription = if (held) stringResource(releaseLabel) else null
                 Canvas(Modifier.weight(1f).height(34.dp).then(
                     if (heldDescription == null) Modifier else Modifier.semantics {
                         contentDescription = heldDescription
@@ -86,8 +88,12 @@ internal fun DictationDock(
                 }
             }
             if (phase.acceptsStopAndSend && !held) {
-                val action = stringResource(if (phase.isRecording) R.string.dictation_stop_and_send
-                    else R.string.dictation_send_recording)
+                val action = stringResource(when {
+                    phase.isRecording && pressEnter -> R.string.dictation_stop_and_send
+                    phase.isRecording -> R.string.dictation_stop_and_insert
+                    pressEnter -> R.string.dictation_send_recording
+                    else -> R.string.dictation_insert_recording
+                })
                 PocketIconControl(action, onStop, emphasized = phase.isRecording) { ink ->
                     Icon(painterResource(R.drawable.ic_terminal_record_stop), null, tint = ink,
                         modifier = Modifier.size(DockGlyphSize))

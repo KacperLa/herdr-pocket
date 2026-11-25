@@ -22,6 +22,13 @@
     <string name="terminal_key_up">Up</string>
     <string name="terminal_key_right">Right</string>
     <string name="terminal_key_down">Down</string>
+    <string name="dictation_settings">Dictation</string>
+    <string name="dictation_press_enter">Press Enter after dictation</string>
+    <string name="dictation_press_enter_detail">Turn off to insert the transcript without submitting it.</string>
+    <string name="dictation_hold_insert">Release the mic to insert the transcript</string>
+    <string name="dictation_stop_and_insert">Recording. Stop and insert the transcript</string>
+    <string name="dictation_insert_recording">Insert the transcript</string>
+    <string name="dictation_ready_to_insert">Recording ready. Tap to insert the transcript.</string>
     <string name="dictation_mic_start">Start dictation. Tap to record or press and hold to talk.</string>
     <string name="dictation_hold_release">Release the mic to transcribe and send</string>
     <string name="dictation_cancel">Cancel dictation</string>

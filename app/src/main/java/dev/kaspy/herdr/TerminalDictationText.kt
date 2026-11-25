@@ -30,6 +30,7 @@ internal fun terminalDictationText(result: String?): String? {
 /** A listener owns one ticket. Even an invalid/empty final callback consumes it. */
 internal class TerminalDictationTicket(
     val terminal: Any, permissionGranted: Boolean = true, val holdToTalk: Boolean = false,
+    val pressEnter: Boolean = true,
 ) {
     var holdReleased = !holdToTalk
         private set

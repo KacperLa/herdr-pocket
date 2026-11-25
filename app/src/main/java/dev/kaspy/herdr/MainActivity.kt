@@ -118,6 +118,12 @@ internal data class TerminalOpeningUi(val title:String,val agentChrome:Boolean)
 
 class PocketModel(app: Application) : AndroidViewModel(app) {
     private val prefs = app.getSharedPreferences("workspace", 0)
+    internal var dictationPressEnter by mutableStateOf(prefs.getBoolean("dictation_press_enter",true))
+        private set
+    internal fun setDictationEnter(enabled:Boolean) {
+        dictationPressEnter=enabled
+        prefs.edit().putBoolean("dictation_press_enter",enabled).apply()
+    }
     private val startupGate=StartupReconnect()
     private val resolver:ContentResolver=app.contentResolver
     private val vault=PassphraseVault(app)
@@ -496,10 +502,10 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
     fun speechTerminalIdentity():Any? =
         displayedPty?.takeIf {!retainedTerminal && !demo && busy && terminalVisible && !showAgentSwitcher &&
             status=="Connected · SSH PTY" && ssh.terminalIdentity()===it}
-    fun sendDictation(identity:Any,text:String,stillAllowed:()->Boolean,completed:(Boolean)->Unit):Boolean {
+    fun sendDictation(identity:Any,text:String,pressEnter:Boolean,stillAllowed:()->Boolean,completed:(Boolean)->Unit):Boolean {
         val renderer=emulator
         if(!stillAllowed() || speechTerminalIdentity()!==identity) return false
-        return renderer.postEncodedUserLine(text) { bytes ->
+        return renderer.postEncodedUserLine(text,pressEnter=pressEnter) { bytes ->
             completed(stillAllowed() && emulator===renderer && speechTerminalIdentity()===identity &&
                 ssh.sendToTerminal(identity,bytes))
         }
@@ -2602,6 +2608,21 @@ private fun ConnectionSettingsScreen(
             ConnectionSection(R.string.connection_alerts_section) {
                 AgentWatchSettings(m.notificationsEnabled,notificationsAllowed,m.watchLeaseToken!=null,
                     setAgentNotifications,openAndroidNotificationSettings)
+            }
+            ConnectionSection(R.string.dictation_settings) {
+                Row(
+                    Modifier.fillMaxWidth().heightIn(min=48.dp).toggleable(
+                        value=m.dictationPressEnter,role=Role.Switch,onValueChange=m::setDictationEnter),
+                    horizontalArrangement=Arrangement.spacedBy(12.dp),
+                    verticalAlignment=Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(stringResource(R.string.dictation_press_enter),style=MaterialTheme.typography.bodyLarge)
+                        Text(stringResource(R.string.dictation_press_enter_detail),
+                            style=MaterialTheme.typography.bodyMedium,color=theme.onSurfaceVariant)
+                    }
+                    androidx.compose.material3.Switch(checked=m.dictationPressEnter,onCheckedChange=null,colors=pocketSwitchColors())
+                }
             }
             ConnectionSection(R.string.connection_advanced_section) {
                 TextButton(onClick={advanced=!advanced}) {

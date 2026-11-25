@@ -235,14 +235,14 @@ fun TerminalEmulator.postEncodedUserKey(
 /** Bound the printable payload well below the 64 KiB packet limit, including UTF-8 expansion. */
 const val MAX_ENCODED_USER_LINE_CHARS = 8192
 
-/** Encode printable text and one native Enter atomically, never delivering either stage alone. */
-fun TerminalEmulator.postEncodedUserLine(text: String, deliver: (ByteArray) -> Unit): Boolean {
+/** Encode printable text and, if requested, one native Enter in the same packet. */
+fun TerminalEmulator.postEncodedUserLine(text: String, pressEnter: Boolean = true, deliver: (ByteArray) -> Unit): Boolean {
     if (text.isBlank() || text.length > MAX_ENCODED_USER_LINE_CHARS || text.any { Character.isISOControl(it) || it == '\u2028' || it == '\u2029' }) return false
     val encoder = this as? TerminalEmulatorImpl ?: return false
     return encoder.postEncodedUserKey(
         encode = { sink -> text.codePoints().forEach { sink.dispatchCharacter(0, it) } },
         deliver = deliver,
-        finish = { sink -> sink.dispatchKey(0, VTermKey.ENTER) },
+        finish = if (pressEnter) ({ sink -> sink.dispatchKey(0, VTermKey.ENTER) }) else null,
     )
 }
 

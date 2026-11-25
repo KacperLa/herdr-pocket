@@ -9,7 +9,9 @@ import termios
 import time
 
 packet = subprocess.check_output([sys.argv[1], '--dictation-line'])
-assert packet == 'café 😀\r'.encode()
+text_only = subprocess.check_output([sys.argv[1], '--dictation-text'])
+assert text_only == 'café 😀'.encode()
+assert packet == text_only + b'\r'
 master, slave = pty.openpty()
 proc = None
 try:
@@ -23,7 +25,12 @@ try:
     )
     os.close(slave)
     slave = None
-    assert os.write(master, packet) == len(packet)
+    assert os.write(master, text_only) == len(text_only)
+    # With the switch off, the shell gets a pending line, not a submission.
+    assert not select.select([master], [], [], .2)[0]
+    assert proc.poll() is None
+    enter = packet[len(text_only):]
+    assert os.write(master, enter) == len(enter)
     content = bytearray()
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
