@@ -17,6 +17,11 @@ internal class LiveDiagnostics(private val clock:()->Long={System.nanoTime()/1_0
         HERDR_TIMEOUT, HERDR_OPERATION_FAILED, CODEX_SESSION_MISSING, CODEX_HISTORY_UNAVAILABLE,
         CODEX_HISTORY_READY, CODEX_REPLY_VERIFIED, CODEX_REPLY_UNVERIFIED,
     }
+    enum class History { SESSION_MISSING, HISTORY_UNAVAILABLE, HISTORY_READY, REPLY_VERIFIED, REPLY_UNVERIFIED }
+
+    @Synchronized fun history(provider:LiveStructuredHistory.Provider,event:History)=
+        append(provider.name.lowercase(Locale.ROOT)+"_"+event.label())
+
     enum class Origin { SETTINGS_TEST, LIVE_CALL }
     enum class Stage { READINESS, DETECT, QUESTION, COMPLETION, OTHER }
     enum class AgentState { IDLE, DONE, WORKING, BLOCKED, UNKNOWN }
@@ -40,9 +45,9 @@ internal class LiveDiagnostics(private val clock:()->Long={System.nanoTime()/1_0
 
     @Synchronized fun preflight(
         state:AgentState,kind:LiveTurnExtraction.Kind,menu:Boolean,problem:LiveExtractionClient.Problem?,
-        knownComposer:Boolean=false, codexHistory:Boolean=false,
+        knownComposer:Boolean=false, structuredHistory:Boolean=false,
     )=append(Event.PREFLIGHT.label(),"herdr="+state.label(),"classification="+kind.label(),"menu=$menu",
-            "source="+when {codexHistory -> "herdr";knownComposer -> "codex_idle_composer";else -> "extractor"},
+            "source="+when {structuredHistory -> "herdr";knownComposer -> "codex_idle_composer";else -> "extractor"},
             problem?.let {"problem="+it.label()})
 
     @Synchronized fun extraction(

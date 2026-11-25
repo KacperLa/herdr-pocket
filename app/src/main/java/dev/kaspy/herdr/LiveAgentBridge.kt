@@ -155,7 +155,14 @@ internal object LiveAgentHerdr {
             before: Status, text: String, baseline: LiveCodexHistory.Page,
             readHistory: suspend () -> LiveCodexHistory.Page?,
             attempts: Int = 100, pause: suspend () -> Unit = { delay(1000) },
-        ): StoredReply? {
+        ): StoredReply? = finishStructured(before, {
+            readHistory()?.let {LiveCodexHistory.match(baseline,it,text)}
+        },attempts,pause)
+
+        suspend fun finishStructured(
+            before:Status, compare:suspend ()->LiveCodexHistory.Match?,
+            attempts:Int=100, pause:suspend ()->Unit={delay(1000)},
+        ):StoredReply? {
             var working = false
             var reads = 0
             var stable: Status? = null
@@ -174,9 +181,9 @@ internal object LiveAgentHerdr {
                     stable = state
                     return@repeat
                 }
-                val page = readHistory()
+                val match = compare()
                 if (current() != state) return null
-                when (val match = page?.let { LiveCodexHistory.match(baseline, it, text) }) {
+                when (match) {
                     is LiveCodexHistory.Match.Completed -> return StoredReply(state, match.draft)
                     LiveCodexHistory.Match.Uncertain -> return null
                     LiveCodexHistory.Match.Waiting, null -> if (++reads >= 3) return null

@@ -115,12 +115,21 @@ run `herdr integration install codex` on the host and relaunch Codex inside
 Herdr. A brand-new session may need its first prompt in the terminal to create
 history. Pocket does not install software or change host config.
 
+**Claude Code and OpenCode:** structured readback also uses the session ID
+reported by the matching Herdr integration (`herdr integration install claude`
+or `herdr integration install opencode`). Restart that agent after installing
+its integration. The same SSH account needs Python 3 and the agent's local
+history: Claude Code reads its exact local project transcript; OpenCode uses
+its session JSON export. The readers do not send history to a chat model.
+Unrecognized history formats, ambiguous turns, and remote-only history stop
+readback instead of silently switching to screen extraction.
+
 Herdr remains the source of agent state. After you approve a prompt, Pocket
-tracks a Herdr work cycle and reads only the newly completed Codex turn that
+tracks a Herdr work cycle and reads only the newly completed agent turn that
 matches that prompt. The terminal remains available for live input requests
 and approvals; ordinary follow-up questions in completed replies can be read
 aloud. Pocket shows an editable readback draft before sharing it with the Live
-service. If it cannot verify a reply, it does not read the screen as a fallback.
+service. If it cannot verify a reply, it does not send the screen to an extractor as a fallback.
 
 **Other agents:** To use the previous screen-based method, configure the full
 HTTPS **Extraction URL**, a chat model that supports structured JSON, and its

@@ -40,7 +40,7 @@ internal class PocketLiveVoice(
         lateinit var route:LiveAgentHerdr.Route
         lateinit var instance:LiveAgentHerdr.Instance
         var extractor:LiveTurnExtraction?=null
-        var codexThread:String?=null
+        var structured:LiveStructuredHistory.Binding?=null
         val transcript=LiveVoiceTranscript()
         val seen=HashSet<String>()
     }
@@ -234,20 +234,30 @@ internal class PocketLiveVoice(
                 ensure(active)
                 active.route=route
                 active.instance=instance
-                if(instance.kind.equals("codex",true)) {
-                    val thread=LiveCodexHistory.threadId(instance)
-                    if(thread==null) {
-                        diagnostics.event(LiveDiagnostics.Event.CODEX_SESSION_MISSING)
-                        fail(active,"Herdr did not report a Codex session ID. Enable Herdr’s Codex integration on the host and reopen the Codex tab. No microphone audio was sent.")
+                val provider=LiveStructuredHistory.provider(instance.kind)
+                if(provider!=null) {
+                    val binding=LiveStructuredHistory.binding(instance)
+                    val codex=provider==LiveStructuredHistory.Provider.CODEX
+                    if(binding==null) {
+                        diagnostics.history(provider,LiveDiagnostics.History.SESSION_MISSING)
+                        val setup=if(codex) " For Codex on a shared daemon, try a new pane with codex --no-daemon."
+                            else " Enable the matching Herdr integration on the host and reopen the agent tab."
+                        fail(active,"Herdr did not report a ${provider.label} session ID."+setup+" No microphone audio was sent.")
                         return@launch
                     }
-                    active.codexThread=thread
-                    if(history(active,thread)==null) {
-                        diagnostics.event(LiveDiagnostics.Event.CODEX_HISTORY_UNAVAILABLE)
-                        fail(active,"Pocket couldn’t read this Codex session. Check that the SSH account can find Codex with thread history support and uses the same Codex storage as the tab. If the tab is new, send its first prompt in the terminal. No microphone audio was sent.")
+                    active.structured=binding
+                    val available=if(codex) history(active,binding.id)!=null else providerHistory(active,binding)!=null
+                    if(!available) {
+                        diagnostics.history(provider,LiveDiagnostics.History.HISTORY_UNAVAILABLE)
+                        val requirement=when(provider) {
+                            LiveStructuredHistory.Provider.CODEX -> "a Codex binary with stored turn history support"
+                            LiveStructuredHistory.Provider.CLAUDE -> "Python 3 and the local Claude Code transcript"
+                            LiveStructuredHistory.Provider.OPENCODE -> "Python 3 and an OpenCode binary with session JSON export"
+                        }
+                        fail(active,"Pocket couldn’t read this ${provider.label} session. Check that the SSH account has $requirement and uses the same storage as the tab. If the tab is new, send its first prompt in the terminal. No microphone audio was sent.")
                         return@launch
                     }
-                    diagnostics.event(LiveDiagnostics.Event.CODEX_HISTORY_READY)
+                    diagnostics.history(provider,LiveDiagnostics.History.HISTORY_READY)
                 } else {
                     if(LiveExtractionClient.endpoint(extractorEndpoint)==null || !LiveExtractionClient.validModel(model)) {
                         fail(active,"For this agent type, set up the optional extraction service in Settings first. No microphone audio was sent.")
@@ -300,6 +310,11 @@ internal class PocketLiveVoice(
 
     private fun ensure(active:Lease) {
         if(lease!==active || !active.anchor.same(currentAnchor())) throw CancellationException("Live Voice route ended")
+    }
+
+    private suspend fun providerHistory(active:Lease,binding:LiveStructuredHistory.Binding):LiveStructuredHistory.Page? {
+        val reply=command(active,LiveStructuredHistory.command(binding))
+        return if(reply.ok) LiveStructuredHistory.parse(binding,reply.stdout) else null
     }
 
     private suspend fun history(active:Lease,thread:String):LiveCodexHistory.Page? {
@@ -366,12 +381,12 @@ internal class PocketLiveVoice(
                             say(active,event.id,"The agent is busy, blocked, changed, or its screen could not be verified. Pocket did not send anything. Check the terminal.")
                             return@launch
                         }
-                        val codex=active.codexThread
+                        val structured=active.structured
                         val extractor=active.extractor
-                        val check=if(codex!=null) LiveTurnExtraction.Observation(LiveTurnExtraction.Kind.NONE)
+                        val check=if(structured!=null) LiveTurnExtraction.Observation(LiveTurnExtraction.Kind.NONE)
                             else LiveAgentHerdr.preflight(before,checkNotNull(extractor),active.ignoreBottomLines)
                         val menu=LiveAgentHerdr.mayHaveActiveMenu(before.screen)
-                        diagnostics.preflight(LiveDiagnostics.agentState(before.status.state),check.kind,menu,check.problem,codexHistory=codex!=null)
+                        diagnostics.preflight(LiveDiagnostics.agentState(before.status.state),check.kind,menu,check.problem,structuredHistory=structured!=null)
                         if(check.kind!=LiveTurnExtraction.Kind.NONE || !before.status.ready || menu) {
                             val question=check.draft
                             val speech=if(check.kind==LiveTurnExtraction.Kind.QUESTION && question!=null &&
@@ -405,10 +420,19 @@ internal class PocketLiveVoice(
                             diagnostics.event(LiveDiagnostics.Event.PROMPT_INVALID)
                             return@launch
                         }
-                        val baseline=if(codex!=null) history(active,codex) else null
-                        if(codex!=null && baseline==null) {
-                            diagnostics.event(LiveDiagnostics.Event.CODEX_HISTORY_UNAVAILABLE)
-                            say(active,event.id,"Pocket could not establish the Codex history baseline. Nothing was sent.")
+                        val compare: (suspend () -> LiveCodexHistory.Match?)? = if(structured==null) null else
+                            if(structured.provider==LiveStructuredHistory.Provider.CODEX) {
+                                history(active,structured.id)?.let {baseline ->
+                                    suspend {history(active,structured.id)?.let {LiveCodexHistory.match(baseline,it,prompt)}}
+                                }
+                            } else {
+                                providerHistory(active,structured)?.let {baseline ->
+                                    suspend {providerHistory(active,structured)?.let {LiveStructuredHistory.match(baseline,it,prompt)}}
+                                }
+                            }
+                        if(structured!=null && compare==null) {
+                            diagnostics.history(structured.provider,LiveDiagnostics.History.HISTORY_UNAVAILABLE)
+                            say(active,event.id,"Pocket could not establish the ${structured.provider.label} history baseline. Nothing was sent.")
                             return@launch
                         }
                         mayHaveSent=true
@@ -423,13 +447,14 @@ internal class PocketLiveVoice(
                             }
                             true -> {
                                 diagnostics.event(LiveDiagnostics.Event.PROMPT_SENT)
-                                if(codex!=null && baseline!=null) {
-                                    val stored=active.route.finishCodex(before.status,prompt,baseline,{history(active,codex)})
+                                if(structured!=null && compare!=null) {
+                                    val label=structured.provider.label
+                                    val stored=active.route.finishStructured(before.status,compare)
                                     if(stored==null) {
-                                        diagnostics.event(LiveDiagnostics.Event.CODEX_REPLY_UNVERIFIED)
-                                        say(active,event.id,"Pocket could not verify a completed Codex reply. Check the terminal for the reply, input request, or approval. No reply text was shared.")
+                                        diagnostics.history(structured.provider,LiveDiagnostics.History.REPLY_UNVERIFIED)
+                                        say(active,event.id,"Pocket could not verify a completed $label reply. Check the terminal for the reply, input request, or approval. No reply text was shared.")
                                     } else {
-                                        diagnostics.event(LiveDiagnostics.Event.CODEX_REPLY_VERIFIED)
+                                        diagnostics.history(structured.provider,LiveDiagnostics.History.REPLY_VERIFIED)
                                         val result=ask(active,PocketLiveReview(event.id,PocketLiveReview.Kind.REPLY,stored.draft))
                                         if(result!=null && LiveAgentHerdr.validShare(result) && active.route.current()==stored.status) {
                                             say(active,event.id,if(active.profile==LiveVoiceProfile.FOSS_LIVE) result
@@ -437,7 +462,7 @@ internal class PocketLiveVoice(
                                             if(lease===active) diagnostics.event(LiveDiagnostics.Event.RESULT_SHARED)
                                         } else {
                                             diagnostics.event(LiveDiagnostics.Event.RESULT_NOT_SHARED)
-                                            say(active,event.id,"No Codex reply was shared; it was skipped or the agent changed.")
+                                            say(active,event.id,"No $label reply was shared; it was skipped or the agent changed.")
                                         }
                                     }
                                     return@launch

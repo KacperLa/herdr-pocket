@@ -226,3 +226,15 @@ channel without changing the attached terminal. Handset smoke test: in a
 Codex tab with saved history, start a call, approve one question, and check
 that the readback dialog contains the matching new answer. Try a blocked turn
 and another phone-side terminal; neither should produce a readback draft.
+
+
+### 0.94-live: Claude Code and OpenCode readback
+
+Tests exercise the shipped SSH reader commands on synthetic local fixtures and
+verify official session binding, exact prompt correlation, Claude parent
+links, completed OpenCode parent turns, partial/wrong-session results, and
+omission of tool data. Test on a real host: open an integrated Claude Code or
+OpenCode pane with local history, start Live Voice, and ask a short question.
+The approval dialog should show only the new final reply. Repeat on a turn
+that needs manual input and verify that Pocket does not answer the prompt or
+read old output. The fixture does not start a real model or agent CLI.
