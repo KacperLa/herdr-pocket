@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.sqrt
 
-/** The owner must request permission and close this engine as soon as its visible route ends. */
+/** The owner must obtain foreground microphone access and close this engine as soon as its agent route ends. */
 internal class LiveVoiceEngine(
     private val endpoint:String,
     bearer:String,

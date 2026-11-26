@@ -129,7 +129,6 @@ internal enum class LiveVoiceUiPhase {
         val observer=androidx.lifecycle.LifecycleEventObserver { _, event ->
             when(event) {
                 androidx.lifecycle.Lifecycle.Event.ON_RESUME -> startGranted()
-                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> voice.stop()
                 else -> Unit
             }
         }
@@ -137,19 +136,11 @@ internal enum class LiveVoiceUiPhase {
         onDispose {
             lifecycle.removeObserver(observer)
             gate.clear()
-            voice.stop()
         }
     }
-    androidx.compose.runtime.SideEffect {
-        gate.removeIfChanged(visible)
-        if(visible==null) voice.stop()
-    }
-    androidx.compose.runtime.LaunchedEffect(voice.phase,visible) {
-        if(voice.phase!=LiveVoiceUiPhase.IDLE && visible!=null) {
-            while(voice.routeIdentity()===visible) kotlinx.coroutines.delay(100)
-            voice.stop()
-        }
-    }
+    // This composition owns only permission requests. The ViewModel retains
+    // the actual call and validates its SSH route through Activity recreation.
+    androidx.compose.runtime.SideEffect { gate.removeIfChanged(visible) }
     LiveVoiceToolbarButton(visible!=null || voice.phase!=LiveVoiceUiPhase.IDLE,voice.phase,voice.level) {
         if(voice.phase!=LiveVoiceUiPhase.IDLE) {
             gate.clear()

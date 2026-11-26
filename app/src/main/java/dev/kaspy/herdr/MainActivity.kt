@@ -518,7 +518,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         displayedPty?.takeIf {!retainedTerminal && !demo && busy && terminalVisible && !showAgentSwitcher &&
             status=="Connected · SSH PTY" && ssh.terminalIdentity()===it}
     internal val liveVoice by lazy {
-        PocketLiveVoice(prefs,viewModelScope,ssh) {
+        PocketLiveVoice(getApplication<Application>(),prefs,viewModelScope,ssh) {
             val target=resume?.takeIf {it.backend==AgentBackend.TUI}
             val address=activeCoreAddress
             val pty=speechTerminalIdentity()
@@ -2466,7 +2466,6 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onPause() {
-        model.liveVoice.stop()
         watchUiVisible=false
         super.onPause()
     }

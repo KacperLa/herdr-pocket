@@ -1,5 +1,7 @@
 package dev.kaspy.herdr
 
+import android.app.Activity
+import android.content.Context
 import android.content.SharedPreferences
 import android.media.AudioManager
 import android.os.Handler
@@ -17,6 +19,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import java.io.IOException
 
@@ -27,11 +30,13 @@ internal data class TuiLiveAnchor(val pty:Any,val address:String,val session:Str
 
 /** Main thread owns leases, SSH operation IDs and review decisions. */
 internal class PocketLiveVoice(
-    private val prefs:SharedPreferences,private val scope:CoroutineScope,private val ssh:SshSession,
+    private val app:Context,private val prefs:SharedPreferences,private val scope:CoroutineScope,private val ssh:SshSession,
     private val currentAnchor:()->TuiLiveAnchor?,
 ) {
     private val handler=Handler(Looper.getMainLooper())
     private data class Lease(val anchor:TuiLiveAnchor,val profile:LiveVoiceProfile,val ignoreBottomLines:Int) {
+        var foreground:LiveVoiceForegroundLeaseGate.Lease?=null
+        var routeWatch:Job?=null
         var engine:LiveVoiceEngine?=null
         var job:Job?=null
         var request:Job?=null
@@ -186,7 +191,7 @@ internal class PocketLiveVoice(
     fun savedIgnoreBottomLines(anchor:TuiLiveAnchor)=
         LiveExtractionWindow.normalize(prefs.getInt(anchor.trimPreference,0))
 
-    fun start(ticket:String,ignoreBottomLines:Int) {
+    fun start(activity:Activity,ticket:String,ignoreBottomLines:Int) {
         val anchor=ticketAnchor ?: return
         val relay=endpoint ?: return
         val mode=profile
@@ -206,8 +211,35 @@ internal class PocketLiveVoice(
         lease=active
         diagnostics.call(mode,disableThinking,bottom)
         phase=LiveVoiceUiPhase.CONNECTING
+        val foreground=LiveVoiceForegroundService.begin(activity) { reason ->
+            if(lease===active) {
+                if(reason==LiveVoiceForegroundLeaseGate.End.USER) stop(finish=true)
+                else fail(active,"Android stopped the Live Voice microphone service.")
+            }
+        }
+        if(foreground==null) {
+            fail(active,"Pocket couldn’t start the microphone service. Check microphone access and start the call while Pocket is visible.")
+            return
+        }
+        active.foreground=foreground
+        active.routeWatch=scope.launch {
+            while(lease===active) {
+                if(!anchor.same(currentAnchor())) {
+                    stop()
+                    return@launch
+                }
+                delay(100)
+            }
+        }
         active.job=scope.launch {
             try {
+                // The service must promote first, even for an instant reconnect or
+                // if the screen locks immediately after pressing Start call.
+                if(withTimeoutOrNull(6_000) {foreground.ready.await()}!=true) {
+                    fail(active,"Pocket couldn’t start the microphone service. Start a new call while Pocket is visible.")
+                    return@launch
+                }
+                ensure(active)
                 val liveKey=if(mode==LiveVoiceProfile.RELAY_TICKET) ticket else withContext(Dispatchers.IO) {
                     LiveSecretStore.open(voiceScope(mode,relay),liveRecord)
                 }
@@ -309,7 +341,9 @@ internal class PocketLiveVoice(
     }
 
     private fun ensure(active:Lease) {
-        if(lease!==active || !active.anchor.same(currentAnchor())) throw CancellationException("Live Voice route ended")
+        if(lease!==active || !active.anchor.same(currentAnchor()) ||
+            active.foreground?.let(LiveVoiceForegroundService::isActive)!=true)
+            throw CancellationException("Live Voice route or microphone service ended")
     }
 
     private suspend fun providerHistory(active:Lease,binding:LiveStructuredHistory.Binding):LiveStructuredHistory.Page? {
@@ -565,9 +599,11 @@ internal class PocketLiveVoice(
         active?.operation?.first?.let(ssh::cancelOperation)
         active?.response?.cancel()
         active?.request?.cancel()
+        active?.routeWatch?.cancel()
         active?.job?.cancel()
         // Route changes always shut down microphone, playback and network now.
         if(finish) active?.engine?.finish() else active?.engine?.close()
+        active?.foreground?.let {LiveVoiceForegroundService.release(app,it)}
     }
 
     companion object {

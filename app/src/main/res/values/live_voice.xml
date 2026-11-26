@@ -10,4 +10,8 @@
     <string name="live_voice_speaker">Speakerphone</string>
     <string name="live_voice_speaker_on">Phone speaker selected</string>
     <string name="live_voice_speaker_auto">Default call audio route</string>
+    <string name="live_voice_notification_channel">Live Voice calls</string>
+    <string name="live_voice_notification_title">Herdr Pocket Live Voice</string>
+    <string name="live_voice_notification_body">A call is in progress</string>
+    <string name="live_voice_notification_stop">End call</string>
 </resources>

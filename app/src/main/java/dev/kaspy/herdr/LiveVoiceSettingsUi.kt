@@ -4,6 +4,9 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.LocalActivity
+import androidx.lifecycle.Lifecycle
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -114,6 +117,7 @@ internal fun LiveVoiceServiceSettings(voice:PocketLiveVoice) {
 
 @Composable
 internal fun LiveVoiceDialogs(voice:PocketLiveVoice) {
+    val activity=LocalActivity.current as? ComponentActivity
     voice.ticketAnchor?.let {anchor ->
         var ticket by remember(anchor) {mutableStateOf("")}
         var bottomLines by remember(anchor) {mutableStateOf(voice.savedIgnoreBottomLines(anchor).toString())}
@@ -122,6 +126,7 @@ internal fun LiveVoiceDialogs(voice:PocketLiveVoice) {
             text={
                 Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(10.dp)) {
                     Text("Microphone audio goes to your Live endpoint. Codex, Claude Code, and OpenCode use stored replies over SSH. Other agents use the optional extraction service, which receives visible terminal snapshots. Pocket asks before submitting a prompt or sharing a reply.")
+                    Text("A call stays on when the screen locks. When Android allows notifications, you can end it from the Live Voice notification.")
                     Text("Live: "+(voice.endpoint.orEmpty()))
                     if(voice.extractorUrl.isNotEmpty()) Text("Optional extractor: "+voice.extractorUrl)
                     if(voice.extractorUrl.isNotEmpty()) OutlinedTextField(value=bottomLines,onValueChange={ value ->
@@ -135,8 +140,14 @@ internal fun LiveVoiceDialogs(voice:PocketLiveVoice) {
                         visualTransformation=PasswordVisualTransformation(),modifier=Modifier.fillMaxWidth())
                 }
             },
-            confirmButton={TextButton(onClick={val submitted=ticket.trim();ticket="";bottom?.let {voice.start(submitted,it)}},
-                enabled=bottom!=null && (voice.profile!=LiveVoiceProfile.RELAY_TICKET || LiveVoiceProtocol.validTicket(ticket.trim()))) {Text("Start call")}},
+            confirmButton={TextButton(onClick={
+                val foreground=activity?.takeIf {it.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)}
+                if(foreground!=null && bottom!=null) {
+                    val submitted=ticket.trim()
+                    ticket=""
+                    voice.start(foreground,submitted,bottom)
+                }
+            }, enabled=activity!=null && bottom!=null && (voice.profile!=LiveVoiceProfile.RELAY_TICKET || LiveVoiceProtocol.validTicket(ticket.trim()))) {Text("Start call")}},
             dismissButton={TextButton(onClick=voice::cancelTicket){Text("Cancel")}})
     }
     voice.review?.let {review ->
