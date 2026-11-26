@@ -124,6 +124,16 @@ its session JSON export. The readers do not send history to a chat model.
 Unrecognized history formats, ambiguous turns, and remote-only history stop
 readback instead of silently switching to screen extraction.
 
+**nobs:** The Herdr host must expose the live `custom:nobs` session ID and
+support `agent prompt --expect-session`, which Pocket requires for every nobs
+prompt. On the host, change into the nobs workspace with `cd`, then launch nobs
+without a different workspace argument. If the session has never saved a
+turn, send one test prompt in its terminal before starting Live Voice.
+Readback uses Python 3's read-only SQLite connection to exactly one standard
+store: `~/.local/state/nobs/nobs.db` or `<workspace>/.nobs/nobs.db`. Pocket does
+not use custom database paths or choose between duplicate matching stores.
+The selected ID, workspace, and database identity remain pinned for the whole call.
+
 Herdr remains the source of agent state. After you approve a prompt, Pocket
 tracks a Herdr work cycle and reads only the newly completed agent turn that
 matches that prompt. The terminal remains available for live input requests

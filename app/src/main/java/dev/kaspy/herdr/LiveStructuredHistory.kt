@@ -4,33 +4,40 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 
-/** Resolve only official bindings for the already-selected Herdr pane. */
+/** Resolve only allowlisted bindings for the already-selected Herdr pane. */
 internal object LiveStructuredHistory {
-    enum class Provider(val label:String) { CODEX("Codex"), CLAUDE("Claude Code"), OPENCODE("OpenCode") }
-    data class Binding(val provider:Provider,val id:String)
+    enum class Provider(val label:String) { CODEX("Codex"), CLAUDE("Claude Code"), OPENCODE("OpenCode"), NOBS("nobs") }
+    data class Binding(val provider:Provider,val id:String,val workspace:String?=null)
     data class Turn(val id:String,val prompt:String?,val final:String?)
-    data class Page(val turns:List<Turn>,val completeHistory:Boolean)
+    data class Page(val turns:List<Turn>,val completeHistory:Boolean,val sourceKey:String?=null)
 
     fun provider(kind:String)=when(kind.lowercase(java.util.Locale.ROOT)) {
         "codex" -> Provider.CODEX
         "claude" -> Provider.CLAUDE
         "opencode" -> Provider.OPENCODE
+        "nobs" -> Provider.NOBS
         else -> null
     }
 
     fun binding(instance:LiveAgentHerdr.Instance):Binding? = runCatching {
         val provider=provider(instance.kind) ?: return null
         if(provider==Provider.CODEX) return LiveCodexHistory.threadId(instance)?.let { Binding(provider,it) }
-        val kind=if(provider==Provider.CLAUDE) "claude" else "opencode"
+        val kind=instance.kind.lowercase(java.util.Locale.ROOT)
+        val source=if(provider==Provider.NOBS) "custom:nobs" else "herdr:$kind"
         val ref=JSONArray(instance.providerSession ?: return null)
-        if(ref.length()!=4 || ref.opt(0)!="herdr:$kind" || ref.opt(1)!=kind || ref.opt(2)!="id") return null
+        if(ref.length()!=4 || ref.opt(0)!=source || ref.opt(1)!=kind || ref.opt(2)!="id") return null
         val id=ref.opt(3) as? String ?: return null
+        if(provider==Provider.NOBS) {
+            val workspace=instance.foregroundCwd?.takeIf(LiveNobsHistory::validWorkspace) ?: return null
+            return Binding(provider,id,workspace).takeIf {LiveNobsHistory.validSessionId(id)}
+        }
         val valid=if(provider==Provider.CLAUDE) UUID.fromString(id).toString()==id
             else id.matches(Regex("ses_[A-Za-z0-9]{4,96}"))
         if(valid) Binding(provider,id) else null
     }.getOrNull()
 
     fun match(before:Page,after:Page,prompt:String):LiveCodexHistory.Match {
+        if(before.sourceKey!=after.sourceKey) return LiveCodexHistory.Match.Uncertain
         val old=before.turns.lastOrNull()
         val edge=if(old==null) {
             if(!before.completeHistory || !after.completeHistory) return LiveCodexHistory.Match.Uncertain
@@ -44,8 +51,9 @@ internal object LiveStructuredHistory {
         return if(LiveReadback.validText(answer)) LiveCodexHistory.Match.Completed(answer) else LiveCodexHistory.Match.Uncertain
     }
 
-    fun command(binding:Binding):String {
+    fun command(binding:Binding,expectedDatabase:String?=null):String {
         require(binding.provider!=Provider.CODEX)
+        if(binding.provider==Provider.NOBS) return LiveNobsHistory.command(binding,expectedDatabase)
         val id=binding.id
         if(binding.provider==Provider.CLAUDE) {
             require(UUID.fromString(id).toString()==id)
@@ -104,20 +112,24 @@ internal object LiveStructuredHistory {
         if info.get('id') != uid or info.get('parentID') or info.get('revert') or not isinstance(rows,list):
             sys.exit(1)
         result = []
-        for msg in rows[-48:]:
+        for i, msg in enumerate(rows[-48:]):
             raw = msg['info']
+            last_message = i == min(48,len(rows))-1
             parts = []
             for p in msg['parts']:
                 lean = {k:p[k] for k in ('type','messageID','sessionID','ignored','synthetic') if k in p}
                 if p.get('type') == 'text':
                     t = p.get('text')
-                    lean['text'] = t[:4001] if isinstance(t,str) else None
+                    lean['text'] = (t if last_message or (raw.get('role')=='user' and len(t)<=4000) else '') if isinstance(t,str) else None
                 parts.append(lean)
             keep = {k:raw[k] for k in ('id','sessionID','role','parentID','finish','time') if k in raw}
             if raw.get('error') is not None:
                 keep['error'] = True
             result.append({'info':keep,'parts':parts})
-        print(json.dumps({'info':{'id':uid},'messages':result,'windowed':len(rows)>48},ensure_ascii=True))
+        projection = json.dumps({'info':{'id':uid},'messages':result,'windowed':len(rows)>48},ensure_ascii=False).encode()
+        if len(projection)>800000:
+            sys.exit(1)
+        sys.stdout.buffer.write(projection+b'\n')
     """.trimIndent()
 
     // Only the exact UUID basename, exactly one regular file beneath the Claude projects
@@ -208,15 +220,23 @@ internal object LiveStructuredHistory {
                 else:
                     final = msg.get('stop_reason') in ('end_turn', 'stop_sequence') and not row.get('isApiErrorMessage') and not row.get('isCompactSummary')
                     final = final and belongs_to_prompt(parent) and all(t in ('text','thinking','redacted_thinking') for t in names)
-                    events.append({'kind':'assistant','final':text[:4001] if final else None})
+                    events.append({'kind':'assistant','final':text if final else None})
             picked += 1
-        print(json.dumps({'session':uid,'complete':complete,'full':not start and picked <= 140,'events':list(events)},ensure_ascii=True))
+        projected = list(events)
+        for older in projected[:-1]:
+            if 'final' in older:
+                older['final'] = None
+        projection = json.dumps({'session':uid,'complete':complete,'full':not start and picked <= 140,'events':projected},ensure_ascii=False).encode()
+        if len(projection)>800000:
+            sys.exit(1)
+        sys.stdout.buffer.write(projection+b'\n')
     """.trimIndent()
 
     fun parse(binding:Binding,output:String):Page? = runCatching {
         val root=JSONObject(output)
         if(binding.provider==Provider.CLAUDE) parseClaude(binding.id,root)
         else if(binding.provider==Provider.OPENCODE) parseOpenCode(binding.id,root)
+        else if(binding.provider==Provider.NOBS) LiveNobsHistory.parse(binding,root)
         else null
     }.getOrNull()
 

@@ -5,7 +5,7 @@ import org.json.JSONObject
 
 /** One selected local Herdr agent. No roster routing, key input or automatic permission handling. */
 internal object LiveAgentHerdr {
-    data class Instance(val location:TuiLocation,val kind:String,val providerSession:String?)
+    data class Instance(val location:TuiLocation,val kind:String,val providerSession:String?,val foregroundCwd:String?=null)
     data class Status(val instance:Instance,val state:String,val sequence:ULong,val completion:ULong?) {
         val ready get()=state=="idle" || state=="done"
     }
@@ -19,9 +19,11 @@ internal object LiveAgentHerdr {
         TuiAgents.resolve("agent read "+pane(location)+" --source visible --lines 30 --format text",session)
     fun validPrompt(text:String)=text.length in 1..4000 && text.trim()==text &&
         !text.startsWith("-") && text.none {it.isISOControl() || it=='\u2028' || it=='\u2029'}
-    fun prompt(location:TuiLocation,session:String?,text:String):String {
+    fun prompt(location:TuiLocation,session:String?,text:String,expectNobsSession:String?=null):String {
         require(validPrompt(text))
-        return TuiAgents.resolve("agent prompt "+pane(location)+" "+TuiAgents.quote(text),session)
+        require(expectNobsSession==null || LiveNobsHistory.validSessionId(expectNobsSession))
+        val guard=expectNobsSession?.let { " "+TuiAgents.quote("--expect-session="+it) }.orEmpty()
+        return TuiAgents.resolve("agent prompt "+pane(location)+" "+TuiAgents.quote(text)+guard,session)
     }
 
     fun status(reply:Reply,location:TuiLocation,type:String="agent_info"):Status? = runCatching {
@@ -39,7 +41,10 @@ internal object LiveAgentHerdr {
                 .takeIf {fields -> fields.last().isNotBlank() && fields.sumOf(String::length)<=2048}
                 ?.let {fields -> org.json.JSONArray(fields).toString()}
         }
-        Status(Instance(location,kind,provider),state,seq,completion)
+        val cwd=(agent.opt("foreground_cwd") as? String)?.takeIf {
+            kind.equals("nobs",true) && LiveNobsHistory.validWorkspace(it)
+        }
+        Status(Instance(location,kind,provider,cwd),state,seq,completion)
     }.getOrNull()
 
     fun screen(raw:String):String? {
@@ -143,7 +148,11 @@ internal object LiveAgentHerdr {
         suspend fun submit(expected:Capture,text:String):Boolean? {
             // A second full capture revalidates the screen after the user's review.
             if(ready(expected.status.instance)!=expected) return false
-            val response=run(prompt(location,session,text))
+            val instance=expected.status.instance
+            val nobs=if(LiveStructuredHistory.provider(instance.kind)==LiveStructuredHistory.Provider.NOBS)
+                LiveStructuredHistory.binding(instance)?.id ?: return false
+                else null
+            val response=run(prompt(location,session,text,nobs))
             val acknowledgement=status(response,location,"agent_prompted")
             // No retry after an uncertain receipt: app cannot know whether Enter was sent.
             return if(acknowledgement?.instance==expected.status.instance) true else null

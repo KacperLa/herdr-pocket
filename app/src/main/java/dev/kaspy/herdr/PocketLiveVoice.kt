@@ -48,6 +48,7 @@ internal class PocketLiveVoice(
         lateinit var instance:LiveAgentHerdr.Instance
         var extractor:LiveTurnExtraction?=null
         var structured:LiveStructuredHistory.Binding?=null
+        var nobsDatabase:String?=null
         val transcript=LiveVoiceTranscript()
         val callerInput=LiveVoiceCallerInput()
         val seen=HashSet<String>()
@@ -279,12 +280,22 @@ internal class PocketLiveVoice(
                     val codex=provider==LiveStructuredHistory.Provider.CODEX
                     if(binding==null) {
                         diagnostics.history(provider,LiveDiagnostics.History.SESSION_MISSING)
-                        val setup=if(codex) " For Codex on a shared daemon, try a new pane with codex --no-daemon."
-                            else " Enable the matching Herdr integration on the host and reopen the agent tab."
+                        val setup=when(provider) {
+                            LiveStructuredHistory.Provider.CODEX -> " For Codex on a shared daemon, try a new pane with codex --no-daemon."
+                            LiveStructuredHistory.Provider.NOBS -> " Use Herdr with custom session bindings and run nobs from inside its own workspace."
+                            else -> " Enable the matching Herdr integration on the host and reopen the agent tab."
+                        }
                         fail(active,"Herdr did not report a ${provider.label} session ID."+setup+" No microphone audio was sent.")
                         return@launch
                     }
                     active.structured=binding
+                    if(provider==LiveStructuredHistory.Provider.NOBS) {
+                        val help=command(active,TuiAgents.resolve("agent prompt --help",anchor.session))
+                        if(!help.ok || "--expect-session" !in help.stdout) {
+                            fail(active,"This Herdr build does not support guarded nobs prompts. Update the host build before starting nobs Live Voice. No microphone audio was sent.")
+                            return@launch
+                        }
+                    }
                     val available=if(codex) history(active,binding.id)!=null else providerHistory(active,binding)!=null
                     if(!available) {
                         diagnostics.history(provider,LiveDiagnostics.History.HISTORY_UNAVAILABLE)
@@ -292,6 +303,7 @@ internal class PocketLiveVoice(
                             LiveStructuredHistory.Provider.CODEX -> "a Codex binary with stored turn history support"
                             LiveStructuredHistory.Provider.CLAUDE -> "Python 3 and the local Claude Code transcript"
                             LiveStructuredHistory.Provider.OPENCODE -> "Python 3 and an OpenCode binary with session JSON export"
+                            LiveStructuredHistory.Provider.NOBS -> "Python 3 and one standard nobs history store. Start nobs from the workspace itself with cd, rather than passing another workspace path to nobs"
                         }
                         fail(active,"Pocket couldn’t read this ${provider.label} session. Check that the SSH account has $requirement and uses the same storage as the tab. If the tab is new, send its first prompt in the terminal. No microphone audio was sent.")
                         return@launch
@@ -354,8 +366,15 @@ internal class PocketLiveVoice(
     }
 
     private suspend fun providerHistory(active:Lease,binding:LiveStructuredHistory.Binding):LiveStructuredHistory.Page? {
-        val reply=command(active,LiveStructuredHistory.command(binding))
-        return if(reply.ok) LiveStructuredHistory.parse(binding,reply.stdout) else null
+        val isNobs=binding.provider==LiveStructuredHistory.Provider.NOBS
+        val reply=command(active,LiveStructuredHistory.command(binding,if(isNobs) active.nobsDatabase else null))
+        val page=if(reply.ok) LiveStructuredHistory.parse(binding,reply.stdout) else null
+        if(isNobs) {
+            val source=page?.sourceKey ?: return null
+            if(active.nobsDatabase!=null && source!=active.nobsDatabase) return null
+            active.nobsDatabase=source
+        }
+        return page
     }
 
     private suspend fun history(active:Lease,thread:String):LiveCodexHistory.Page? {

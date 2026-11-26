@@ -75,7 +75,7 @@ internal fun LiveVoiceServiceSettings(voice:PocketLiveVoice) {
             Text("When off, the selected agent may receive fresh voice requests and your Live endpoint may receive verified stored replies without asking, even while the screen is locked. Terminal approvals and screen-based replies still need review.")
         }
     }
-    Text("Codex, Claude Code, and OpenCode use stored replies over SSH, without an extraction model. For other agents, the optional service below receives visible terminal text.")
+    Text("Codex, Claude Code, OpenCode, and nobs use stored replies over SSH, without an extraction model. For other agents, the optional service below receives visible terminal text.")
     OutlinedTextField(value=extractor,onValueChange={extractor=it.take(2048)},singleLine=true,
         label={Text("Extraction URL (full chat completions endpoint)")},modifier=Modifier.fillMaxWidth(),
         keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Uri))
@@ -140,7 +140,7 @@ internal fun LiveVoiceDialogs(voice:PocketLiveVoice) {
         PocketDialog(onDismissRequest=voice::cancelTicket,title={Text("Start Live Voice?")},
             text={
                 Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(10.dp)) {
-                    Text("Microphone audio goes to your Live endpoint. Codex, Claude Code, and OpenCode use stored replies over SSH. Other agents use the optional extraction service, which receives visible terminal snapshots.")
+                    Text("Microphone audio goes to your Live endpoint. Codex, Claude Code, OpenCode, and nobs use stored replies over SSH. Other agents use the optional extraction service, which receives visible terminal snapshots.")
                     Text(if(voice.requireReview) "Pocket asks before submitting a prompt or sharing a reply."
                         else "Review is off: Pocket can send fresh voice requests and read verified stored replies without asking. Terminal approvals and screen-based replies still need review.")
                     Text("A call stays on when the screen locks. When Android allows notifications, you can end it from the Live Voice notification.")

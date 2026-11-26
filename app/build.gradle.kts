@@ -2,7 +2,7 @@ plugins { id("com.android.application"); id("org.jetbrains.kotlin.plugin.compose
 android {
  namespace = "dev.kaspy.herdr"
  compileSdk = 37
- defaultConfig { applicationId = "dev.kaspy.herdr"; minSdk = 34; targetSdk = 36; versionCode = 98; versionName = "0.98-live"; ndk { abiFilters += "arm64-v8a" } }
+ defaultConfig { applicationId = "dev.kaspy.herdr"; minSdk = 34; targetSdk = 36; versionCode = 99; versionName = "0.99-live"; ndk { abiFilters += "arm64-v8a" } }
  buildFeatures { compose = true }
  compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
  packaging { dex.useLegacyPackaging = true; resources.excludes += setOf("META-INF/DEPENDENCIES", "META-INF/LICENSE*", "META-INF/NOTICE*") }
