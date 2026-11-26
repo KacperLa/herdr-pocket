@@ -51,8 +51,8 @@ class TuiAgentsTest {
         val result=TuiAgents.parse("""{"result":{"type":"session_snapshot","snapshot":{
           "workspaces":[{"workspace_id":"w","label":"Pocket Space"}],
           "agents":[
-            {"terminal_id":"term_a","pane_id":"p1","tab_id":"t","workspace_id":"w","name":"Jetson AI","agent":"codex",
-             "title":"Jetson AI | Pocket Space","terminal_title_stripped":"Jetson AI | Inspect CI| pocket space"},
+            {"terminal_id":"term_a","pane_id":"p1","tab_id":"t","workspace_id":"w","name":"Atlas Lab","agent":"codex",
+             "title":"Atlas Lab | Pocket Space","terminal_title_stripped":"Atlas Lab | Inspect CI| pocket space"},
             {"terminal_id":"term_b","pane_id":"p2","tab_id":"t","workspace_id":"w","name":"Kit","agent":"claude",
              "title":"Kit | Pocket Space","terminal_title":"Claude Code | Pocket Space","tokens":{"summary":"Look for regressions"}},
             {"terminal_id":"term_c","pane_id":"p3","tab_id":"t","workspace_id":"w","name":"Scout","agent":"codex",
@@ -60,11 +60,11 @@ class TuiAgentsTest {
             {"terminal_id":"term_d","pane_id":"p4","tab_id":"t","workspace_id":"w","name":"Review","agent":"codex",
              "title":"Help Review move to Pocket Space"}
           ]}}}""")
-        assertEquals(listOf("Jetson AI","Kit","Scout","Review"),result.map {it.name})
+        assertEquals(listOf("Atlas Lab","Kit","Scout","Review"),result.map {it.name})
         assertEquals(List(4) {"Pocket Space"},result.map {it.rosterPlacement?.workspaceLabel})
         assertEquals(listOf("Inspect CI","Look for regressions",null,"Help Review move to Pocket Space"),
             result.map {it.compactDescription})
-        assertEquals("Jetson AI | Pocket Space",result[0].description)
+        assertEquals("Atlas Lab | Pocket Space",result[0].description)
     }
 
     @Test fun bothRostersRenderEveryFreshStatusAsReportedByHerdr() {
@@ -145,7 +145,7 @@ class TuiAgentsTest {
                         [ "${'$'}FIXTURE" = legacy ] && exit 1
                         printf '%s\n' '{"result":{"type":"session_snapshot","snapshot":{"agents":[]}}}' ;;
                     'agent list') printf '%s\n' '{"result":{"type":"agent_list","agents":[{"terminal_id":"term_abc","agent":"codex","pane_id":"p","workspace_id":"w","tab_id":"t"}]}}' ;;
-                    'pane list') printf '%s\n' '{"result":{"type":"pane_list","panes":[{"terminal_id":"term_abc","pane_id":"p","workspace_id":"w","tab_id":"t","label":"Jetson AI"}]}}' ;;
+                    'pane list') printf '%s\n' '{"result":{"type":"pane_list","panes":[{"terminal_id":"term_abc","pane_id":"p","workspace_id":"w","tab_id":"t","label":"Atlas Lab"}]}}' ;;
                     'tab list') printf 'not JSON\n'; exit 1 ;;
                     'workspace list') printf '%s\n' '{"result":{"type":"workspace_list","workspaces":[]}}' ;;
                     'terminal attach') printf '%s\n' "${'$'}@" ;;
@@ -190,7 +190,7 @@ class TuiAgentsTest {
         val payload="""{"id":"cli:api:snapshot","result":{"type":"session_snapshot","snapshot":{
           "version":"0.9.5","protocol":22,
           "workspaces":[
-            {"workspace_id":"w1","label":"Jetson AI"},
+            {"workspace_id":"w1","label":"Atlas Lab"},
             {"workspace_id":"w2","label":"myrepo","worktree":{"repo_name":"myrepo","repo_root":"/src/myrepo"}},
             {"workspace_id":"w3","label":"~"}
           ],

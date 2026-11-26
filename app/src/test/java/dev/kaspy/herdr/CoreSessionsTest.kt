@@ -30,14 +30,14 @@ class CoreSessionsTest {
     }
 
     @Test fun compactCardDropsDuplicateHeadingAndWorkspaceButKeepsTask() {
-        fun desc(value:String)=agentCardDescription(value,"Pocket Space","Jetson AI")
-        assertNull(desc("Jetson AI | Pocket Space"))
-        assertNull(desc("  jetson ai|POCKET SPACE  "))
-        assertEquals("Read logs",desc("Jetson AI | Read logs| Pocket Space"))
-        assertEquals("Take Jetson AI to Pocket Space",desc("Take Jetson AI to Pocket Space"))
-        assertEquals("Jetson AI related task | Pocket Space backup",
-            desc("Jetson AI related task | Pocket Space backup"))
-        assertEquals("Filter by | and keep results",desc("Jetson AI • Filter by | and keep results · Pocket Space"))
+        fun desc(value:String)=agentCardDescription(value,"Pocket Space","Atlas Lab")
+        assertNull(desc("Atlas Lab | Pocket Space"))
+        assertNull(desc("  Atlas Lab|POCKET SPACE  "))
+        assertEquals("Read logs",desc("Atlas Lab | Read logs| Pocket Space"))
+        assertEquals("Take Atlas Lab to Pocket Space",desc("Take Atlas Lab to Pocket Space"))
+        assertEquals("Atlas Lab related task | Pocket Space backup",
+            desc("Atlas Lab related task | Pocket Space backup"))
+        assertEquals("Filter by | and keep results",desc("Atlas Lab • Filter by | and keep results · Pocket Space"))
         assertEquals("Read logs",agentCardDescription("A | B | Read logs | C | D","C | D","A | B"))
     }
 

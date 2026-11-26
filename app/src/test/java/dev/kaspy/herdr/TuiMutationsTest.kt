@@ -12,8 +12,8 @@ class TuiMutationsTest {
         """{"result":{"type":"$type","$key":$value}}"""
 
     @Test fun paneRenameRequiresExactAgentLocationAndServerConfirmation() {
-        val renamed=response("pane_info","pane","""{$fields,"label":"Jetson AI"}""")
-        assertTrue(TuiMutations.confirmsPane(renamed,loc,"Jetson AI"))
+        val renamed=response("pane_info","pane","""{$fields,"label":"Atlas Lab"}""")
+        assertTrue(TuiMutations.confirmsPane(renamed,loc,"Atlas Lab"))
         assertFalse(TuiMutations.confirmsPane(renamed,loc.copy(terminalId="term_other")))
         assertFalse(TuiMutations.confirmsPane(renamed,loc.copy(tabId="w1:t4")))
         assertFalse(TuiMutations.confirmsPane(renamed,loc,"different label"))

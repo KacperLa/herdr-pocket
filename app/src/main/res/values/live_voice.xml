@@ -1,0 +1,17 @@
+<resources>
+    <string name="live_voice_settings">Live Voice preview</string>
+    <string name="live_voice_start">Start GPT-Live for this agent</string>
+    <string name="live_voice_cancel">Cancel Live Voice connection</string>
+    <string name="live_voice_stop">Stop Live Voice</string>
+    <string name="live_voice_idle">Off</string>
+    <string name="live_voice_connecting">Connecting</string>
+    <string name="live_voice_listening">Listening</string>
+    <string name="live_voice_speaking">Speaking</string>
+    <string name="live_voice_speaker">Speakerphone</string>
+    <string name="live_voice_speaker_on">Phone speaker selected</string>
+    <string name="live_voice_speaker_auto">Default call audio route</string>
+    <string name="live_voice_notification_channel">Live Voice calls</string>
+    <string name="live_voice_notification_title">Herdr Pocket Live Voice</string>
+    <string name="live_voice_notification_body">A call is in progress</string>
+    <string name="live_voice_notification_stop">End call</string>
+</resources>

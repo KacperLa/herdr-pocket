@@ -83,9 +83,9 @@ The Herdr API agent name is shown in both pickers and header, not a hook or term
 A previously visible remote terminal is retained during reconnect and displays a centered action or progress text; the terminal is read-only until a current SSH PTY is available. Error and Connection settings routes remain available. Exact pinned-profile retry, automatic retry limits, original target routing and deliberate cancellation behavior are unchanged. No new dependencies. 83 Android unit tests and the separate SSH loopback fixture (61 focused assertions, same transport first-frame switch in 144 ms, occupied target/refusal and reconnect/SSH checks) passed. Lint: 0 errors, 14 warnings. ARM64 APK/native segments pass 16 KiB alignment. Android rendering, TalkBack, actual fold/IME behavior and timing on the user's server were not measured here.
 
 ## Herdr Pocket 0.19
-Herdr v0.9.5 GUI Rename routes were traced through `client/shell/context_menu.rs`, `overlay_input.rs` and the public session schema. A GUI pane label is independent of the agent CLI name, as are tab and workspace display labels. The tagged CLI agent rename validator does not accept a spaced label such as Jetson AI. A modern read-only snapshot joins labels by exact IDs and honors precedence explicit agent → pane → non-default tab → workspace → neutral runner. The public workspace snapshot does not have a custom flag on this tag; recognizable defaults from directory/repo metadata are skipped. Optional legacy metadata requests are individually nullable; no remote writes or attach protocol changes. Agent descriptions remain separate. The roster uses a large accessible status avatar at left and one runner/path line.
+Herdr v0.9.5 GUI Rename routes were traced through `client/shell/context_menu.rs`, `overlay_input.rs` and the public session schema. A GUI pane label is independent of the agent CLI name, as are tab and workspace display labels. The tagged CLI agent rename validator does not accept a spaced label such as Atlas Lab. A modern read-only snapshot joins labels by exact IDs and honors precedence explicit agent → pane → non-default tab → workspace → neutral runner. The public workspace snapshot does not have a custom flag on this tag; recognizable defaults from directory/repo metadata are skipped. Optional legacy metadata requests are individually nullable; no remote writes or attach protocol changes. Agent descriptions remain separate. The roster uses a large accessible status avatar at left and one runner/path line.
 
-84 Gradle unit checks and 62 focused checks passed, including rename refresh on the same ID, stale pane ID rejection, a source-shaped Jetson AI workspace, correct tab order, optional legacy query failure and no dangling metadata separators. SSH loopback verified snapshot discovery and same-transport switch (143 ms), refusal retaining original PTY, pin/auth and reconnect. Release lint: 0 errors, 14 warnings; compact arm64 release passes ZIP/native 16 KiB alignment. Local AF_UNIX is unavailable, so the release was not tested with a live Herdr daemon, handset, accessibility service or user server.
+84 Gradle unit checks and 62 focused checks passed, including rename refresh on the same ID, stale pane ID rejection, a source-shaped Atlas Lab workspace, correct tab order, optional legacy query failure and no dangling metadata separators. SSH loopback verified snapshot discovery and same-transport switch (143 ms), refusal retaining original PTY, pin/auth and reconnect. Release lint: 0 errors, 14 warnings; compact arm64 release passes ZIP/native 16 KiB alignment. Local AF_UNIX is unavailable, so the release was not tested with a live Herdr daemon, handset, accessibility service or user server.
 
 ## Herdr Pocket 0.20
 Long-press a connected TUI roster card to rename exactly its pane. The client verifies terminal/pane/tab/workspace identity before writing, validates Herdr's returned identity and label, and refreshes the roster; it does not rename the shared tab/workspace or canonical agent slug. A manual pane label takes title priority. This is the upstream `pane.rename` API exposed by the CLI; Herdr's API has no atomic compare-and-set precondition, so a user moving/swapping a pane concurrently between the preflight and mutation is not an atomic transaction.
@@ -213,3 +213,28 @@ The quick actions and direction popover hide during capture and processing. A ri
 ### 0.85: changed SSH host identity
 
 Host trust tests cover leaving the saved key intact until confirmation, stale offers, failed writes, and host/port isolation. The disposable SSH fixture rejects a mismatched pin, observes no authentication or command during explicit review, and authenticates only on a separate connection after explicit replacement. Release build, app and terminal unit tests, and release lint passed; the dialog was not exercised on a handset.
+
+### 0.93-live: stored Codex readback
+
+The app tests cover the exact Herdr session binding, fixed read-only RPCs,
+partial/malformed responses, the Herdr work-cycle gate, delayed persistence,
+old/interrupted/duplicate turns, mismatched prompts, and a final reply with an
+ordinary follow-up question. The optional `python3 tests/live/codex-history.py`
+contract check runs the installed Codex App Server against isolated synthetic
+history. The SSH fixture checks that a fragmented RPC response closes its own
+channel without changing the attached terminal. Handset smoke test: in a
+Codex tab with saved history, start a call, approve one question, and check
+that the readback dialog contains the matching new answer. Try a blocked turn
+and another phone-side terminal; neither should produce a readback draft.
+
+
+### 0.94-live: Claude Code and OpenCode readback
+
+Tests exercise the shipped SSH reader commands on synthetic local fixtures and
+verify official session binding, exact prompt correlation, Claude parent
+links, completed OpenCode parent turns, partial/wrong-session results, and
+omission of tool data. Test on a real host: open an integrated Claude Code or
+OpenCode pane with local history, start Live Voice, and ask a short question.
+The approval dialog should show only the new final reply. Repeat on a turn
+that needs manual input and verify that Pocket does not answer the prompt or
+read old output. The fixture does not start a real model or agent CLI.

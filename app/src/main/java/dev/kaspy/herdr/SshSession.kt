@@ -49,7 +49,12 @@ class SshSession(private val onEvent: (Long, Event) -> Unit) : AutoCloseable {
 
     private data class Size(val columns: Int, val rows: Int, val px: Int, val py: Int)
 
-    private class Operation(val id: Long, val switchSize: Size?, val tui:Boolean) {
+    /** A bounded one-shot RPC on a non-PTY channel; keep stdin open until its reply arrives. */
+    internal class StdioExchange(val request: ByteArray, val responseSeen: (String) -> Boolean) {
+        init { require(request.size in 1..4096) }
+    }
+
+    private class Operation(val id: Long, val switchSize: Size?, val tui:Boolean, val exchange: StdioExchange?) {
         @Volatile var canceled = false
         @Volatile var overflow = false
         private val tuiFrame = if (tui) TuiAttachFrame() else null
@@ -545,6 +550,9 @@ class SshSession(private val onEvent: (Long, Event) -> Unit) : AutoCloseable {
     /** List on a separate non-PTY channel without interrupting current terminal I/O. */
     fun listOnTransport(command: String): Long? = startOperation(command, null)
 
+    internal fun exchangeOnTransport(command: String, exchange: StdioExchange): Long? =
+        startOperation(command, null, exchange = exchange)
+
     /** Stage a new PTY; the current PTY remains active until the replacement commits. */
     fun switchPty(command: String, columns: Int = 80, rows: Int = 24, tui:Boolean=false): Long? =
         startOperation(command, size(columns, rows, 0, 0), tui)
@@ -557,7 +565,7 @@ class SshSession(private val onEvent: (Long, Event) -> Unit) : AutoCloseable {
         true
     }
 
-    private fun startOperation(command: String, switchSize: Size?, tui:Boolean=false): Long? {
+    private fun startOperation(command: String, switchSize: Size?, tui:Boolean=false, exchange: StdioExchange?=null): Long? {
         require(command.isNotBlank() && '\u0000' !in command) { "A terminal command is required." }
         return synchronized(lock) {
             val attempt = active ?: return@synchronized null
@@ -567,7 +575,7 @@ class SshSession(private val onEvent: (Long, Event) -> Unit) : AutoCloseable {
             if (permanentlyClosed || !attempt.setupComplete || attempt.ending ||
                 attempt.operation != null || !session.isConnected || (!idle && !livePty)
             ) return@synchronized null
-            val operation = Operation(++nextOperation, switchSize, tui)
+            val operation = Operation(++nextOperation, switchSize, tui, exchange)
             attempt.operation = operation
             operations.execute { runOperation(attempt, session, operation, command) }
             operation.id
@@ -595,17 +603,39 @@ class SshSession(private val onEvent: (Long, Event) -> Unit) : AutoCloseable {
                 channel.setPtyType("xterm-256color", switchSize.columns, switchSize.rows, switchSize.px, switchSize.py)
             }
             channel.setCommand(command)
-            val stdin = if (switchSize != null) channel.outputStream else null
+            val stdin = if (switchSize != null || operation.exchange != null) channel.outputStream else null
             channel.setOutputStream(operationSink(attempt, operation, channel, false))
             channel.setErrStream(operationSink(attempt, operation, channel, true))
             channel.connect(CONNECT_MS)
             if (switchSize == null) {
-                val end = System.nanoTime() + TimeUnit.SECONDS.toNanos(NON_PTY_DEADLINE_SECONDS)
-                while (operationActive(attempt, operation) && !channel.isClosed &&
-                    !operation.overflow && System.nanoTime() < end) Thread.sleep(25)
+                val exchange = operation.exchange
+                if (exchange != null && operationActive(attempt, operation)) {
+                    checkNotNull(stdin).write(exchange.request)
+                    stdin.flush()
+                }
+                val end = System.nanoTime() + TimeUnit.SECONDS.toNanos(if (exchange == null) NON_PTY_DEADLINE_SECONDS else 8L)
+                var matched = false
+                var examined = 0
+                while (operationActive(attempt, operation) && !operation.overflow && System.nanoTime() < end) {
+                    if (exchange != null) {
+                        val now = operation.stdout.size()
+                        if (now != examined) {
+                            val snapshot = operation.stdout.toByteArray()
+                            examined = snapshot.size
+                            if (exchange.responseSeen(snapshot.toString(Charsets.UTF_8))) {
+                                matched = true
+                                break
+                            }
+                        }
+                    }
+                    if (channel.isClosed) break
+                    Thread.sleep(25)
+                }
                 result = synchronized(attempt.outputOrder) {
                     when {
                         operation.overflow -> Event.OperationFailed(operation.id, "Session list exceeds 1 MiB.")
+                        matched -> Event.OperationList(operation.id, operation.stdout.toByteArray(), ByteArray(0), 0)
+                        exchange != null -> Event.OperationFailed(operation.id, "The read-only host RPC did not return a complete reply.")
                         !channel.isClosed -> Event.OperationFailed(operation.id, "Session list did not finish within 30 seconds.")
                         else -> Event.OperationList(operation.id, operation.stdout.toByteArray(),
                             operation.stderr.toByteArray(), channel.exitStatus.takeIf { it >= 0 })

@@ -256,6 +256,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
     internal val terminalRecovery get()=terminalRecoveryUi(retainedTerminal,terminalVisible,busy,canReconnect)
 
     private fun suspendCurrentTerminal() {
+        liveVoice.stop()
         FilesUploadInterruption.onConnectionLoss(activeUpload!=null,activeUpload?.request!=null)
             ?.let {filesUploadNotice=it}
         dismissAgentMenu()
@@ -516,6 +517,19 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
     fun speechTerminalIdentity():Any? =
         displayedPty?.takeIf {!retainedTerminal && !demo && busy && terminalVisible && !showAgentSwitcher &&
             status=="Connected · SSH PTY" && ssh.terminalIdentity()===it}
+    internal val liveVoice by lazy {
+        PocketLiveVoice(getApplication<Application>(),prefs,viewModelScope,ssh) {
+            val target=resume?.takeIf {it.backend==AgentBackend.TUI}
+            val address=activeCoreAddress
+            val pty=speechTerminalIdentity()
+            val hostScope=target?.let {AgentPinScope.from(it.config,it.backend,it.tuiSession)}
+            if(target!=null && address!=null && target.address==address && pty!=null && hostScope!=null &&
+                !agentMenuOpen && filesUi==null)
+                TuiLiveAnchor(pty,address,target.tuiSession,LiveExtractionWindow.preferenceKey(hostScope,address))
+            else null
+        }
+    }
+
     fun sendDictation(identity:Any,text:String,pressEnter:Boolean,stillAllowed:()->Boolean,completed:(Boolean)->Unit):Boolean {
         val renderer=emulator
         if(!stillAllowed() || speechTerminalIdentity()!==identity) return false
@@ -990,6 +1004,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
 
     internal fun openAgentMenu() {
         if (canSwitchAgents && terminalVisible && !showAgentSwitcher) {
+            liveVoice.stop()
             agentMenuOpen = true
             openAgentSettings()
         }
@@ -1509,6 +1524,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
 
     fun openAgentSwitcher() {
         if(!canSwitchAgents || showAgentSwitcher) return
+        liveVoice.stop()
         showAgentSwitcher=true
         refreshAgents()
     }
@@ -2025,7 +2041,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                         listErrors.write(event.bytes,0,minOf(event.bytes.size,8192-listErrors.size()))
                     if(!listing) renderConnectionOutput(event.bytes)
                 }
-                is SshSession.Event.OperationList -> if(coldRosterOperation==event.id) {
+                is SshSession.Event.OperationList -> if(liveVoice.accept(event)) Unit else if(coldRosterOperation==event.id) {
                     finishColdRoster(event)
                 } else if(agentSettingsRequest==event.id) {
                     acceptAgentSettings(event)
@@ -2066,7 +2082,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
                 is SshSession.Event.OperationSwitched -> acceptSwitch(event.id)
-                is SshSession.Event.OperationFailed -> if(coldRosterOperation==event.id) {
+                is SshSession.Event.OperationFailed -> if(liveVoice.accept(event)) Unit else if(coldRosterOperation==event.id) {
                     failColdRoster(event.message)
                 } else if(agentSettingsRequest==event.id) {
                     failedAgentSettings()
@@ -2391,6 +2407,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
 
     fun disconnect(manual:Boolean=false) {
         if(manual) prefs.edit().putBoolean("startup_manually_disconnected",true).apply()
+        liveVoice.stop()
         if(AgentWatchService.state.value is AgentWatchServiceState.Active) AgentWatchService.stop(getApplication<Application>())
         if(retainedTerminal) terminalVisible=false
         retainedTerminal=false
@@ -2410,7 +2427,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         val payload=Base64.encodeToString(out.toByteArray(),Base64.NO_WRAP)
         emulator.writeInput(("\u001b_Ga=T,f=100,t=d,i=42,c=24,r=5;"+payload+"\u001b\\\r\n\r\nLocal PNG sent through Kitty escape bytes.\r\nPinch text to zoom; rotate or unfold to resize.\r\nThis is not a remote Herdr session.\r\n").toByteArray())
     }
-    override fun onCleared() {prefs.unregisterOnSharedPreferenceChangeListener(notificationPrefListener);clearRosterWatchLease();clearRetainedOutput();finishStartup();clearPendingSave();clearResume();ssh.close();emulator.close();retiredEmulators.forEach { it.close() };retiredEmulators.clear();passphrase=""}
+    override fun onCleared() {liveVoice.stop();prefs.unregisterOnSharedPreferenceChangeListener(notificationPrefListener);clearRosterWatchLease();clearRetainedOutput();finishStartup();clearPendingSave();clearResume();ssh.close();emulator.close();retiredEmulators.forEach { it.close() };retiredEmulators.clear();passphrase=""}
 }
 
 class MainActivity : ComponentActivity() {
@@ -2511,6 +2528,8 @@ class MainActivity : ComponentActivity() {
  var rosterView by rememberSaveable { mutableStateOf(AgentRosterView.AGENTS) }
  val agentsScroll=rememberLazyListState()
  val spacesScroll=rememberLazyListState()
+
+ LiveVoiceDialogs(m.liveVoice)
 
  m.offeredTrust?.let { offer ->
     val replacing=offer.previousPin!=null
@@ -2692,6 +2711,7 @@ private fun ConnectionSettingsScreen(
                     androidx.compose.material3.Switch(checked=m.dictationPressEnter,onCheckedChange=null,colors=pocketSwitchColors())
                 }
             }
+            ConnectionSection(R.string.live_voice_settings) { LiveVoiceServiceSettings(m.liveVoice) }
             ConnectionSection(R.string.connection_advanced_section) {
                 TextButton(onClick={advanced=!advanced}) {
                     Text(stringResource(if(advanced) R.string.connection_hide_advanced else R.string.connection_show_advanced))

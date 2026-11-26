@@ -150,6 +150,14 @@ fun main() {
         check(list.id == listId && list.exitStatus == 0 && list.stderr.toString(Charsets.UTF_8) == "list diagnostic")
         val selected = CoreSessions.parse(list.stdout.toString(Charsets.UTF_8)).single().address
         check(selected == "box/t4")
+        val historyCommand="/bin/sh -c " + TuiAgents.quote("fixture=1\nexec codex app-server --listen stdio://")
+        val request="{\"id\":2}\n".toByteArray()
+        val exchangeId=checkNotNull(ssh.exchangeOnTransport(historyCommand,
+            SshSession.StdioExchange(request) { it.lineSequence().any { line -> line == "{\"id\":2,\"result\":{}}" } && it.endsWith('\n') }))
+        val exchanged=event() as SshSession.Event.OperationList
+        check(exchanged.id==exchangeId && exchanged.exitStatus==0)
+        check(exchanged.stdout.decodeToString().endsWith("{\"id\":2,\"result\":{}}\n"))
+        check(ssh.terminalIdentity()===oldTerminal)
         val failureId = checkNotNull(ssh.switchPty(CoreSessions.attachCommand("box/bad")))
         check((event() as SshSession.Event.OperationFailed).id == failureId)
         check(ssh.send("after failure".toByteArray()))
@@ -177,7 +185,7 @@ fun main() {
 
         val existing=checkNotNull(tuiAgent.tuiLocation)
         check(TuiMutations.confirmsPane(rpc(TuiMutations.inspectPane(existing,"office")),existing))
-        check(TuiMutations.confirmsPane(rpc(TuiMutations.renamePane(existing,"Jetson AI 2","office")),existing,"Jetson AI 2"))
+        check(TuiMutations.confirmsPane(rpc(TuiMutations.renamePane(existing,"Atlas Lab 2","office")),existing,"Atlas Lab 2"))
         val tabTarget=TuiMutations.RenameTarget.TAB
         check(TuiMutations.confirmsTarget(rpc(TuiMutations.inspectTarget(existing,tabTarget,"office")),existing,tabTarget))
         check(TuiMutations.confirmsTarget(
