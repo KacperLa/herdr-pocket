@@ -25,12 +25,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
@@ -38,7 +43,10 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -166,7 +174,7 @@ private fun TerminalDockIconKey(icon:Int,labelRes:Int,enabled:Boolean,onClick:()
     }
 }
 
-private object DirectionPopupPosition : PopupPositionProvider {
+internal object DirectionPopupPosition : PopupPositionProvider {
     override fun calculatePosition(
         anchorBounds:IntRect,
         windowSize:IntSize,
@@ -192,29 +200,83 @@ private fun DirectionKeys(
 ) {
     var buttonDown by remember(terminalIdentity,active) { mutableLongStateOf(-1000L) }
     var outsideDismissed by remember(terminalIdentity,active) { mutableLongStateOf(-2000L) }
+    var triggerCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    val keyCoordinates=remember(terminalIdentity,active) { mutableStateMapOf<DpadShortcut,LayoutCoordinates>() }
+    var slidePosition by remember(terminalIdentity,active) { mutableStateOf<Offset?>(null) }
+    val currentOnKey by rememberUpdatedState(onKey)
+    val currentOnExpandedChange by rememberUpdatedState(onExpandedChange)
+    val showing=expanded || slidePosition!=null
+
+    fun keyAt(point:Offset):DpadShortcut? = dpadKeyAt(point,keyCoordinates.mapNotNull { (key,coordinates) ->
+        if(!coordinates.isAttached) return@mapNotNull null
+        val origin=coordinates.localToScreen(Offset.Zero)
+        if(!origin.isSpecified || !origin.x.isFinite() || !origin.y.isFinite()) return@mapNotNull null
+        key to Rect(origin.x,origin.y,origin.x+coordinates.size.width,origin.y+coordinates.size.height)
+    })
+
+    fun close() {
+        slidePosition=null
+        currentOnExpandedChange(false)
+    }
+    BackHandler(enabled=slidePosition!=null) { close() }
+
     val directionLabel=stringResource(R.string.terminal_directional_keys)
-    val expansionLabel=stringResource(if(expanded) R.string.terminal_directional_expanded else R.string.terminal_directional_collapsed)
-    Box {
+    val expansionLabel=stringResource(if(showing) R.string.terminal_directional_expanded else R.string.terminal_directional_collapsed)
+    Box(
+        Modifier.onGloballyPositioned { triggerCoordinates=it }.pointerInput(terminalIdentity,active) {
+            awaitEachGesture {
+                val down=awaitFirstDown(requireUnconsumed=false,pass=PointerEventPass.Initial)
+                buttonDown=SystemClock.uptimeMillis()
+                if(!active || down.type!=PointerType.Touch) return@awaitEachGesture
+                var sliding=false
+                try {
+                    while(true) {
+                        val event=awaitPointerEvent(PointerEventPass.Initial)
+                        val change=event.changes.firstOrNull { it.id==down.id } ?: break
+                        if(event.changes.any { it.id!=down.id && (it.pressed || it.previousPressed) }) break
+                        if(sliding && slidePosition==null) break
+                        if(!sliding && change.pressed &&
+                            (change.position-down.position).getDistance()>viewConfiguration.touchSlop) {
+                            sliding=true
+                        }
+                        if(sliding) {
+                            // Android keeps this touch stream in the trigger's window even
+                            // after the non-focusable popup appears. Hit-test in screen space.
+                            val point=triggerCoordinates?.takeIf { it.isAttached }
+                                ?.localToScreen(change.position) ?: Offset.Unspecified
+                            change.consume() // Do not let the trigger's normal click fire.
+                            if(!change.pressed) {
+                                val key=keyAt(point)
+                                close()
+                                if(key!=null) currentOnKey(key.keyCode)
+                                break
+                            }
+                            slidePosition=point
+                        } else if(!change.pressed) {
+                            break
+                        }
+                    }
+                } finally {
+                    if(sliding && slidePosition!=null) close()
+                }
+            }
+        }
+    ) {
         Surface(
             onClick={
                 // The popup can dismiss on this tap's down event before the button's up event.
                 val sameTap=abs(buttonDown-outsideDismissed)<=40
                 buttonDown=-1000L
-                onExpandedChange(!expanded && !sameTap)
+                onExpandedChange(!showing && !sameTap)
             },
             enabled=active,
-            modifier=Modifier.size(DockTargetSize).pointerInput(terminalIdentity,active) {
-                awaitEachGesture {
-                    awaitFirstDown(requireUnconsumed=false,pass=PointerEventPass.Initial)
-                    buttonDown=SystemClock.uptimeMillis()
-                }
-            }.semantics {
+            modifier=Modifier.size(DockTargetSize).semantics {
                 contentDescription=directionLabel
                 role=Role.Button
                 stateDescription=expansionLabel
             },
-            color=if(expanded) DockActiveFill else DockBlack,
-            border=if(expanded) BorderStroke(2.dp,Color.White) else null,
+            color=if(showing) DockActiveFill else DockBlack,
+            border=if(showing) BorderStroke(2.dp,Color.White) else null,
             contentColor=if(active) Color.White else DisabledWhite,
             shape=CircleShape,
         ) {
@@ -222,10 +284,14 @@ private fun DirectionKeys(
                 DpadIcon(if(active) Color.White else DisabledWhite)
             }
         }
-        if(expanded && active) {
+        if(showing && active) {
+            val highlighted=slidePosition?.let { keyAt(it) }
+            val register:(DpadShortcut,LayoutCoordinates?)->Unit={key,coordinates ->
+                if(coordinates==null) keyCoordinates.remove(key) else keyCoordinates[key]=coordinates
+            }
             Popup(
                 popupPositionProvider=DirectionPopupPosition,
-                onDismissRequest={outsideDismissed=SystemClock.uptimeMillis();onExpandedChange(false)},
+                onDismissRequest={outsideDismissed=SystemClock.uptimeMillis();close()},
                 properties=PopupProperties(focusable=false,dismissOnClickOutside=true),
             ) {
                 Surface(shape=RoundedCornerShape(18.dp),color=DockBlack,contentColor=Color.White,
@@ -235,19 +301,19 @@ private fun DirectionKeys(
                         horizontalArrangement=Arrangement.spacedBy(4.dp),
                     ) {
                         Column(verticalArrangement=Arrangement.spacedBy(4.dp)) {
-                            DpadShortcutButton(DpadShortcut.HOME,active,onKey)
-                            DpadShortcutButton(DpadShortcut.LEFT,active,onKey)
-                            DpadShortcutButton(DpadShortcut.END,active,onKey)
+                            DpadShortcutButton(DpadShortcut.HOME,active,highlighted,register,onKey)
+                            DpadShortcutButton(DpadShortcut.LEFT,active,highlighted,register,onKey)
+                            DpadShortcutButton(DpadShortcut.END,active,highlighted,register,onKey)
                         }
                         Column(verticalArrangement=Arrangement.spacedBy(4.dp)) {
-                            DpadShortcutButton(DpadShortcut.UP,active,onKey)
-                            DpadShortcutButton(DpadShortcut.ENTER,active,onKey)
-                            DpadShortcutButton(DpadShortcut.DOWN,active,onKey)
+                            DpadShortcutButton(DpadShortcut.UP,active,highlighted,register,onKey)
+                            DpadShortcutButton(DpadShortcut.ENTER,active,highlighted,register,onKey)
+                            DpadShortcutButton(DpadShortcut.DOWN,active,highlighted,register,onKey)
                         }
                         Column(verticalArrangement=Arrangement.spacedBy(4.dp)) {
-                            DpadShortcutButton(DpadShortcut.PAGE_UP,active,onKey)
-                            DpadShortcutButton(DpadShortcut.RIGHT,active,onKey)
-                            DpadShortcutButton(DpadShortcut.PAGE_DOWN,active,onKey)
+                            DpadShortcutButton(DpadShortcut.PAGE_UP,active,highlighted,register,onKey)
+                            DpadShortcutButton(DpadShortcut.RIGHT,active,highlighted,register,onKey)
+                            DpadShortcutButton(DpadShortcut.PAGE_DOWN,active,highlighted,register,onKey)
                         }
                     }
                 }
@@ -276,7 +342,7 @@ private fun DpadIcon(color:Color) {
     }
 }
 
-private enum class DpadShortcut(val keyCode:Int,val label:Int) {
+internal enum class DpadShortcut(val keyCode:Int,val label:Int) {
     LEFT(KeyEvent.KEYCODE_DPAD_LEFT,R.string.terminal_key_left),
     UP(KeyEvent.KEYCODE_DPAD_UP,R.string.terminal_key_up),
     DOWN(KeyEvent.KEYCODE_DPAD_DOWN,R.string.terminal_key_down),
@@ -288,14 +354,23 @@ private enum class DpadShortcut(val keyCode:Int,val label:Int) {
     PAGE_DOWN(KeyEvent.KEYCODE_PAGE_DOWN,R.string.terminal_key_page_down),
 }
 
+internal fun dpadKeyAt(point:Offset,bounds:List<Pair<DpadShortcut,Rect>>):DpadShortcut? =
+    if(!point.isSpecified || !point.x.isFinite() || !point.y.isFinite()) null
+    else bounds.firstOrNull { (_,rect) -> rect.contains(point) }?.first
+
 @Composable
-private fun DpadShortcutButton(shortcut:DpadShortcut,enabled:Boolean,onKey:(Int)->Unit) {
+private fun DpadShortcutButton(
+    shortcut:DpadShortcut,enabled:Boolean,highlighted:DpadShortcut?,
+    register:(DpadShortcut,LayoutCoordinates?)->Unit,onKey:(Int)->Unit,
+) {
+    DisposableEffect(shortcut) { onDispose { register(shortcut,null) } }
     val label=stringResource(shortcut.label)
     val ink=if(enabled) Color.White else DisabledWhite
     Surface(
         onClick={onKey(shortcut.keyCode)},enabled=enabled,
-        modifier=Modifier.size(DockTargetSize).semantics {contentDescription=label;role=Role.Button},
-        shape=CircleShape,color=DockBlack,contentColor=ink,
+        modifier=Modifier.size(DockTargetSize).onGloballyPositioned { register(shortcut,it) }
+            .semantics {contentDescription=label;role=Role.Button},
+        shape=CircleShape,color=if(shortcut==highlighted) DockActiveFill else DockBlack,contentColor=ink,
     ) {
         Box(contentAlignment=Alignment.Center) {
             Canvas(Modifier.size(DockGlyphSize)) {
