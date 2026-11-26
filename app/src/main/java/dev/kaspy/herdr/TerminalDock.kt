@@ -85,8 +85,8 @@ internal fun TerminalDock(
     var directionsExpanded by remember(terminalIdentity,active) { mutableStateOf(false) }
     fun canSend()=active && m.speechTerminalIdentity()===terminalIdentity
     BackHandler(enabled=directionsExpanded) { directionsExpanded=false }
-    val showTypingControls=m.liveVoice.phase.showTerminalTypingControls
-    TerminalDictationControls(enabled=inputEnabled && m.dictationEnabled && showTypingControls,terminalIdentity=m::speechTerminalIdentity,send=m::sendDictation,pressEnter=m.dictationPressEnter,
+    val showSpeaker=m.liveVoice.phase.showsSpeakerSlot
+    TerminalDictationControls(enabled=inputEnabled && m.dictationEnabled && !showSpeaker,terminalIdentity=m::speechTerminalIdentity,send=m::sendDictation,pressEnter=m.dictationPressEnter,
         onExclusiveDock={directionsExpanded=false},buttonEnabled=!opening) { mic ->
         Surface(
             modifier=Modifier.fillMaxWidth().padding(horizontal=8.dp,vertical=5.dp),
@@ -126,6 +126,8 @@ internal fun TerminalDock(
                         }
                     }
                     Row(verticalAlignment=Alignment.CenterVertically) {
+                        if(m.liveVoice.routeIdentity()!=null || showSpeaker) LiveVoiceDockControl(m.liveVoice,inputEnabled)
+                        if(showSpeaker) LiveVoiceSpeakerButton(m.liveVoice,inputEnabled) else mic()
                         DirectionKeys(
                             active=active,
                             expanded=directionsExpanded,
@@ -133,15 +135,11 @@ internal fun TerminalDock(
                             onKey={if(canSend())onKey(it)},
                             terminalIdentity=terminalIdentity,
                         )
-                        if(m.liveVoice.routeIdentity()!=null) LiveVoiceDockControl(m.liveVoice,inputEnabled)
-                        if(showTypingControls) {
-                            mic()
-                            TerminalDockIconKey(
-                                R.drawable.ic_terminal_keyboard,
-                                if(keyboardShownOrRequested) R.string.terminal_hide_keyboard else R.string.terminal_show_keyboard,
-                                enabled=inputEnabled && !m.demo,
-                            ) {directionsExpanded=false;onToggleKeyboard()}
-                        }
+                        TerminalDockIconKey(
+                            R.drawable.ic_terminal_keyboard,
+                            if(keyboardShownOrRequested) R.string.terminal_hide_keyboard else R.string.terminal_show_keyboard,
+                            enabled=inputEnabled && !m.demo,
+                        ) {directionsExpanded=false;onToggleKeyboard()}
                     }
                 }
             }

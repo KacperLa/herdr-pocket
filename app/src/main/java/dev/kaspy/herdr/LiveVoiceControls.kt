@@ -11,9 +11,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
@@ -36,13 +34,14 @@ import androidx.compose.ui.unit.dp
 internal enum class LiveVoiceUiPhase {
     IDLE, CONNECTING, LISTENING, SPEAKING;
 
-    val showTerminalTypingControls: Boolean get() = this == IDLE
+    val showsSpeakerSlot: Boolean get() = this != IDLE
+    val canSwitchSpeaker: Boolean get() = this == LISTENING || this == SPEAKING
 }
 
 @Composable internal fun LiveVoiceToolbarButton(
     enabled:Boolean, phase:LiveVoiceUiPhase, audioLevel:Float, onToggle:()->Unit,
 ) {
-    val active=phase==LiveVoiceUiPhase.LISTENING || phase==LiveVoiceUiPhase.SPEAKING
+    val active=phase.canSwitchSpeaker
     val label=stringResource(when(phase) {
         LiveVoiceUiPhase.IDLE -> R.string.live_voice_start
         LiveVoiceUiPhase.CONNECTING -> R.string.live_voice_cancel
@@ -64,7 +63,7 @@ internal enum class LiveVoiceUiPhase {
     Surface(
         onClick=onToggle,enabled=enabled,
         shape=CircleShape,color=if(active) Color.White else Color.Transparent,
-        modifier=Modifier.height(48.dp).width(if(active) 58.dp else 48.dp).semantics {
+        modifier=Modifier.size(DockTargetSize).semantics {
             contentDescription=label
             stateDescription=status
             role=Role.Button
@@ -87,6 +86,24 @@ internal enum class LiveVoiceUiPhase {
                 Icon(painterResource(R.drawable.ic_terminal_live_voice),contentDescription=null,
                     tint=Color.White.copy(alpha=if(enabled) pulse else .38f),modifier=Modifier.size(24.dp))
             }
+        }
+    }
+}
+
+@Composable internal fun LiveVoiceSpeakerButton(voice:PocketLiveVoice,inputEnabled:Boolean) {
+    val context=androidx.compose.ui.platform.LocalContext.current
+    val enabled=inputEnabled && voice.phase.canSwitchSpeaker && voice.routeIdentity()!=null
+    val label=stringResource(R.string.live_voice_speaker)
+    val status=stringResource(if(voice.speakerphone) R.string.live_voice_speaker_on else R.string.live_voice_speaker_auto)
+    Surface(shape=CircleShape,color=if(voice.speakerphone) Color.White else Color.Transparent,
+        modifier=Modifier.size(DockTargetSize)
+            .toggleable(value=voice.speakerphone,enabled=enabled,role=Role.Switch) {
+                voice.toggleSpeakerphone(context.getSystemService(AudioManager::class.java))
+            }.semantics {contentDescription=label;stateDescription=status}) {
+        Box(contentAlignment=Alignment.Center) {
+            Icon(painterResource(R.drawable.ic_live_voice_speaker),contentDescription=null,
+                tint=if(voice.speakerphone) Color.Black else Color.White.copy(alpha=if(enabled) 1f else .38f),
+                modifier=Modifier.size(DockGlyphSize))
         }
     }
 }
@@ -133,21 +150,7 @@ internal enum class LiveVoiceUiPhase {
             voice.stop()
         }
     }
-    if(voice.phase==LiveVoiceUiPhase.LISTENING || voice.phase==LiveVoiceUiPhase.SPEAKING) {
-        val label=stringResource(R.string.live_voice_speaker)
-        val status=stringResource(if(voice.speakerphone) R.string.live_voice_speaker_on else R.string.live_voice_speaker_auto)
-        Surface(shape=CircleShape,color=if(voice.speakerphone) Color.White else Color.Transparent,
-            modifier=Modifier.size(48.dp)
-                .toggleable(value=voice.speakerphone,enabled=visible!=null,role=Role.Switch) {
-                    voice.toggleSpeakerphone(context.getSystemService(AudioManager::class.java))
-                }.semantics {contentDescription=label;stateDescription=status}) {
-            Box(contentAlignment=Alignment.Center) {
-                Icon(painterResource(R.drawable.ic_live_voice_speaker),contentDescription=null,
-                    tint=if(voice.speakerphone) Color.Black else Color.White,modifier=Modifier.size(24.dp))
-            }
-        }
-    }
-    LiveVoiceToolbarButton(visible!=null,voice.phase,voice.level) {
+    LiveVoiceToolbarButton(visible!=null || voice.phase!=LiveVoiceUiPhase.IDLE,voice.phase,voice.level) {
         if(voice.phase!=LiveVoiceUiPhase.IDLE) {
             gate.clear()
             voice.stop(finish=true)

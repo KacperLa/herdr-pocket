@@ -5,11 +5,16 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LiveVoiceDockTest {
-    @Test fun terminalTypingControlsYieldToEveryCallPhaseAndReturnAtIdle() {
-        assertTrue(LiveVoiceUiPhase.IDLE.showTerminalTypingControls)
-        assertFalse(LiveVoiceUiPhase.CONNECTING.showTerminalTypingControls)
-        assertFalse(LiveVoiceUiPhase.LISTENING.showTerminalTypingControls)
-        assertFalse(LiveVoiceUiPhase.SPEAKING.showTerminalTypingControls)
-        assertTrue(LiveVoiceUiPhase.IDLE.showTerminalTypingControls)
+    @Test fun theAudioSlotSwapsWithoutAddingAControl() {
+        assertFalse(LiveVoiceUiPhase.IDLE.showsSpeakerSlot)
+        assertTrue(LiveVoiceUiPhase.CONNECTING.showsSpeakerSlot)
+        assertTrue(LiveVoiceUiPhase.LISTENING.showsSpeakerSlot)
+        assertTrue(LiveVoiceUiPhase.SPEAKING.showsSpeakerSlot)
+    }
+    @Test fun speakerActivationWaitsForTheCallToConnect() {
+        assertFalse(LiveVoiceUiPhase.IDLE.canSwitchSpeaker)
+        assertFalse(LiveVoiceUiPhase.CONNECTING.canSwitchSpeaker)
+        assertTrue(LiveVoiceUiPhase.LISTENING.canSwitchSpeaker)
+        assertTrue(LiveVoiceUiPhase.SPEAKING.canSwitchSpeaker)
     }
 }
