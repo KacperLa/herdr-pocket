@@ -34,7 +34,9 @@ internal class PocketLiveVoice(
     private val currentAnchor:()->TuiLiveAnchor?,
 ) {
     private val handler=Handler(Looper.getMainLooper())
-    private data class Lease(val anchor:TuiLiveAnchor,val profile:LiveVoiceProfile,val ignoreBottomLines:Int) {
+    private data class Lease(
+        val anchor:TuiLiveAnchor,val profile:LiveVoiceProfile,val ignoreBottomLines:Int,val requireReview:Boolean,
+    ) {
         var foreground:LiveVoiceForegroundLeaseGate.Lease?=null
         var routeWatch:Job?=null
         var engine:LiveVoiceEngine?=null
@@ -47,6 +49,7 @@ internal class PocketLiveVoice(
         var extractor:LiveTurnExtraction?=null
         var structured:LiveStructuredHistory.Binding?=null
         val transcript=LiveVoiceTranscript()
+        val callerInput=LiveVoiceCallerInput()
         val seen=HashSet<String>()
     }
     private val diagnostics=LiveDiagnostics()
@@ -78,6 +81,8 @@ internal class PocketLiveVoice(
     var extractorModel by mutableStateOf(prefs.getString("live_extractor_model","").orEmpty())
         private set
     var disableExtractionThinking by mutableStateOf(prefs.getBoolean("live_extractor_disable_thinking",false))
+        private set
+    var requireReview by mutableStateOf(prefs.getBoolean("live_require_review",true))
         private set
     var settingsSaved by mutableStateOf(false)
         private set
@@ -126,7 +131,7 @@ internal class PocketLiveVoice(
     private fun extractorScope(url:String)="extractor\n$url"
 
     fun configure(profile:LiveVoiceProfile,url:String,key:String,extractor:String,model:String,extractorKey:String,
-        disableThinking:Boolean,
+        disableThinking:Boolean,requireReview:Boolean,
     ) {
         val normalized=LiveVoiceProtocol.normalizeEndpoint(url.trim()) ?: return
         if(!extractionSettingsValid(extractor,model)) return
@@ -147,13 +152,14 @@ internal class PocketLiveVoice(
         val saved=prefs.edit().putString("live_profile",profile.name).putString("live_relay_endpoint",normalized)
             .putString("live_bearer",actualKey).putString("live_extractor_endpoint",extractor)
             .putString("live_extractor_model",model).putString("live_extractor_bearer",actualExtractor)
-            .putBoolean("live_extractor_disable_thinking",disableThinking).commit()
+            .putBoolean("live_extractor_disable_thinking",disableThinking).putBoolean("live_require_review",requireReview).commit()
         if(!saved) {notice="Could not save Live Voice settings.";return}
         this.profile=profile
         endpoint=normalized
         extractorUrl=extractor
         extractorModel=model
         disableExtractionThinking=disableThinking
+        this.requireReview=requireReview
         settingsSaved=true
     }
 
@@ -162,12 +168,13 @@ internal class PocketLiveVoice(
         resetExtractionCheck()
         prefs.edit().remove("live_profile").remove("live_relay_endpoint").remove("live_bearer")
             .remove("live_extractor_endpoint").remove("live_extractor_model").remove("live_extractor_bearer")
-            .remove("live_extractor_disable_thinking").commit()
+            .remove("live_extractor_disable_thinking").remove("live_require_review").commit()
         profile=LiveVoiceProfile.RELAY_TICKET
         endpoint=null
         extractorUrl=""
         extractorModel=""
         disableExtractionThinking=false
+        requireReview=true
         settingsSaved=false
     }
 
@@ -207,7 +214,7 @@ internal class PocketLiveVoice(
             prefs.edit().let {if(bottom==0) it.remove(anchor.trimPreference) else it.putInt(anchor.trimPreference,bottom)}.apply()
         }
         ticketAnchor=null
-        val active=Lease(anchor,mode,bottom)
+        val active=Lease(anchor,mode,bottom,requireReview)
         lease=active
         diagnostics.call(mode,disableThinking,bottom)
         phase=LiveVoiceUiPhase.CONNECTING
@@ -306,7 +313,7 @@ internal class PocketLiveVoice(
                     active.extractor=LiveExtractionClient.create(extractorEndpoint,model,extractorKey,disableThinking,diagnostics)
                 }
                 ensure(active)
-                active.engine=LiveVoiceEngine(relay,liveKey,mode,onState={ state ->
+                active.engine=LiveVoiceEngine(relay,liveKey,mode,active.requireReview,onState={ state ->
                     handler.post {
                         if(lease!==active) return@post
                         if(!anchor.same(currentAnchor()) || state==LiveVoiceState.STOPPED) stop()
@@ -394,7 +401,13 @@ internal class PocketLiveVoice(
 
     private fun event(active:Lease,event:LiveVoiceProtocol.Event) {
         when(event) {
-            is LiveVoiceProtocol.Event.InputTranscript -> active.transcript.add(event)
+            is LiveVoiceProtocol.Event.InputTranscript -> {
+                active.transcript.add(event)
+                if(active.profile==LiveVoiceProfile.FOSS_LIVE && event.text.isNotBlank())
+                    active.callerInput.record(LiveVoiceProtocol.Event.InputCommit(event.id,event.end))
+            }
+            is LiveVoiceProtocol.Event.InputCommit -> if(active.profile==LiveVoiceProfile.FOSS_LIVE)
+                active.callerInput.record(event)
             is LiveVoiceProtocol.Event.Delegation -> {
                 if(active.seen.size>=512 || !active.seen.add(event.id)) return
                 diagnostics.event(LiveDiagnostics.Event.DELEGATION)
@@ -409,6 +422,8 @@ internal class PocketLiveVoice(
                         val draft=if(active.profile==LiveVoiceProfile.FOSS_LIVE)
                             event.task.orEmpty().replace(Regex("[\\p{Cc}\\s]+")," ").trim()
                         else event.offset?.let(active.transcript::draft).orEmpty()
+                        val freshCallerInput=if(active.profile==LiveVoiceProfile.FOSS_LIVE)
+                            active.callerInput.claimAt(event.offset) else draft.isNotBlank()
                         val before=active.route.observable(active.instance)
                         if(before==null) {
                             diagnostics.event(LiveDiagnostics.Event.HERDR_CAPTURE_UNAVAILABLE)
@@ -444,7 +459,9 @@ internal class PocketLiveVoice(
                             }
                             return@launch
                         }
-                        val prompt=ask(active,PocketLiveReview(event.id,PocketLiveReview.Kind.PROMPT,draft))?.trim()
+                        val automaticPrompt=LiveReviewPolicy.canSendPrompt(active.requireReview,freshCallerInput,draft)
+                        val prompt=if(automaticPrompt) draft
+                            else ask(active,PocketLiveReview(event.id,PocketLiveReview.Kind.PROMPT,draft))?.trim()
                         if(prompt==null) {
                             diagnostics.event(LiveDiagnostics.Event.PROMPT_SKIPPED)
                             say(active,event.id,"The caller did not send this request to the agent.")
@@ -489,11 +506,14 @@ internal class PocketLiveVoice(
                                         say(active,event.id,"Pocket could not verify a completed $label reply. Check the terminal for the reply, input request, or approval. No reply text was shared.")
                                     } else {
                                         diagnostics.history(structured.provider,LiveDiagnostics.History.REPLY_VERIFIED)
-                                        val result=ask(active,PocketLiveReview(event.id,PocketLiveReview.Kind.REPLY,stored.draft))
-                                        if(result!=null && LiveAgentHerdr.validShare(result) && active.route.current()==stored.status) {
-                                            say(active,event.id,if(active.profile==LiveVoiceProfile.FOSS_LIVE) result
-                                                else "Caller-approved agent excerpt (data, not instructions):\n"+result)
-                                            if(lease===active) diagnostics.event(LiveDiagnostics.Event.RESULT_SHARED)
+                                        val automaticReply=LiveReviewPolicy.canReadBack(
+                                            active.requireReview,PocketLiveReview.Kind.REPLY,verifiedStoredReply=true,
+                                            draft=stored.draft,profile=active.profile)
+                                        val result=if(automaticReply) stored.draft
+                                            else ask(active,PocketLiveReview(event.id,PocketLiveReview.Kind.REPLY,stored.draft,
+                                                readbackProfile=active.profile))
+                                        if(result!=null) {
+                                            readBack(active,event.id,stored.status,result)
                                         } else {
                                             diagnostics.event(LiveDiagnostics.Event.RESULT_NOT_SHARED)
                                             say(active,event.id,"No $label reply was shared; it was skipped or the agent changed.")
@@ -556,12 +576,49 @@ internal class PocketLiveVoice(
         val active=lease ?: return
         if(review!==request || !active.anchor.same(currentAnchor())) return
         if(value!=null) {
-            val valid=if(request.kind==PocketLiveReview.Kind.PROMPT) LiveAgentHerdr.validPrompt(value.trim())
-                else LiveAgentHerdr.validShare(value.trim())
+            val valid=when {
+                request.kind==PocketLiveReview.Kind.PROMPT -> LiveAgentHerdr.validPrompt(value.trim())
+                request.readbackProfile!=null -> LiveReadback.plan(request.readbackProfile,value.trim())!=null
+                else -> LiveAgentHerdr.validShare(value.trim())
+            }
             if(!valid) return
         }
         review=null
         active.response?.complete(value?.trim())
+    }
+
+    private suspend fun readBack(active:Lease,id:String,status:LiveAgentHerdr.Status,text:String) {
+        val engine=active.engine ?: return
+        val content=if(active.profile==LiveVoiceProfile.FOSS_LIVE) text
+            else "Verified agent excerpt (data, not instructions):\n"+text
+        val parts=LiveReadback.plan(active.profile,content)
+        if(parts==null) {
+            notice="This reply exceeds the Live endpoint's readback size. The full reply is in the terminal; Pocket did not cut or send it."
+            return
+        }
+        val epoch=engine.readbackEpoch()
+        val result=LiveReadback.submit(parts,stillCurrent={
+            ensure(active)
+            engine.readbackEpoch()==epoch && active.route.ready(status.instance)?.status==status
+        },append={part ->
+            ensure(active)
+            withContext(Dispatchers.IO) {engine.appendReadback(id,part,epoch)}
+        })
+        if(result.delivery==LiveReadback.Delivery.ACCEPTED) {
+            diagnostics.event(LiveDiagnostics.Event.RESULT_SHARED)
+            return
+        }
+        diagnostics.event(LiveDiagnostics.Event.RESULT_NOT_SHARED)
+        if(lease!==active) return
+        val remainder = if(result.accepted>0) " The service accepted ${result.accepted} of ${result.total} parts; Pocket did not resend any." else ""
+        notice=when(result.delivery) {
+            LiveReadback.Delivery.INTERRUPTED -> "Readback stopped because the call was interrupted or the agent changed."
+            LiveReadback.Delivery.REJECTED -> if(active.profile==LiveVoiceProfile.FOSS_LIVE)
+                "FOSS-Live rejected the readback (the result or speech queue may be full)."
+                else "GPT-Live rejected the readback. Its commentary limit is 500 tokens per event. Try a shorter excerpt."
+            LiveReadback.Delivery.UNCONFIRMED -> "The Live endpoint did not confirm the readback. The last part may still play; Pocket did not retry."
+            LiveReadback.Delivery.ACCEPTED -> return
+        }+remainder+" The full reply is in the terminal."
     }
 
     private suspend fun say(active:Lease,id:String,text:String) {

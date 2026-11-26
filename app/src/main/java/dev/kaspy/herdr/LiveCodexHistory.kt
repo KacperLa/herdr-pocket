@@ -96,7 +96,6 @@ internal object LiveCodexHistory {
         if (last.opt("phase") != "final_answer") return Match.Uncertain
         val reply = (last.opt("text") as? String)?.trim()?.takeIf { it.isNotBlank() } ?: return Match.Uncertain
         if (reply.any { it.isISOControl() && it !in "\n\t" }) return Match.Uncertain
-        val draft = LiveAgentHerdr.compactExcerpt(reply)
-        return if (LiveAgentHerdr.validShare(draft)) Match.Completed(draft) else Match.Uncertain
+        return if (LiveReadback.validText(reply)) Match.Completed(reply) else Match.Uncertain
     }
 }

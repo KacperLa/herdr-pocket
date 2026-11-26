@@ -128,8 +128,23 @@ Herdr remains the source of agent state. After you approve a prompt, Pocket
 tracks a Herdr work cycle and reads only the newly completed agent turn that
 matches that prompt. The terminal remains available for live input requests
 and approvals; ordinary follow-up questions in completed replies can be read
-aloud. Pocket shows an editable readback draft before sharing it with the Live
-service. If it cannot verify a reply, it does not send the screen to an extractor as a fallback.
+aloud. By default, Pocket shows editable drafts for the request and stored reply.
+Turn off **Review agent requests and replies** and save to opt in to sending a
+fresh voice request and reading a verified stored reply without dialogs, including
+when the screen is locked. Pocket still checks the exact agent, session, state
+and terminal menu; agent questions, terminal approvals, uncertain caller input
+and screen-based reply drafts are never automatically approved. If Pocket cannot
+verify a stored reply, it does not fall back to screen extraction.
+
+Stored replies are not silently cropped or summarized. FOSS-Live receives up to
+2,000 Unicode scalars and 8,000 UTF-8 bytes per append, with 16,000 UTF-8 bytes
+per delegation counting separators. Pocket sends each part in order after the
+previous part is acknowledged and stops if the route changes or speech is
+interrupted. The service may reject a full speech queue or remove Markdown
+formatting and fenced code before synthesis. GPT-Live accepts one append up to
+its own 500-token limit and may paraphrase. A reply outside the transport limit
+can be shortened manually; an unknown acknowledgement does not cause a retry.
+The prompt limit is separate: 4,000 UTF-16 units of single-line text.
 
 **Other agents:** To use the previous screen-based method, configure the full
 HTTPS **Extraction URL**, a chat model that supports structured JSON, and its

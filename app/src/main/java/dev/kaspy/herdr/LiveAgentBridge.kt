@@ -278,6 +278,7 @@ internal class LiveVoiceTranscript {
 
 internal data class PocketLiveReview(
     val id:String,val kind:Kind,val draft:String,val evidence:String?=null,
+    val readbackProfile:LiveVoiceProfile?=null,
 ) {
     enum class Kind { PROMPT, QUESTION, REPLY }
 }

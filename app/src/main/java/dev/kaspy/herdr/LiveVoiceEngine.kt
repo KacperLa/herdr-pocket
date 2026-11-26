@@ -8,9 +8,12 @@ import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.sqrt
 
@@ -19,6 +22,7 @@ internal class LiveVoiceEngine(
     private val endpoint:String,
     bearer:String,
     private val profile:LiveVoiceProfile,
+    private val requireReview:Boolean,
     private val onState:(LiveVoiceState)->Unit,
     private val onError:(String)->Unit,
     private val onLevel:(Float)->Unit={},
@@ -30,6 +34,9 @@ internal class LiveVoiceEngine(
     private val finishing=AtomicBoolean()
     private val ready=AtomicBoolean()
     private val state=AtomicReference<LiveVoiceState?>()
+    private data class PendingReadback(val eventId:String,val acknowledgement:CompletableDeferred<LiveReadback.Delivery>)
+    private val readbackPending=AtomicReference<PendingReadback?>()
+    private val readbackGeneration=AtomicLong()
     private val socket=LiveVoiceSocket()
     private val chunks=LiveAudioQueue()
     private val audioGate=Any()
@@ -53,7 +60,7 @@ internal class LiveVoiceEngine(
             val token=key.getAndSet(null)?.takeIf {LiveVoiceProtocol.validCredential(profile,it)} ?: throw Setup("Check the Live Voice credential in Settings.")
             if(closed.get()) return
             socket.connect(address,token)
-            socket.text(LiveVoiceProtocol.start(profile))
+            socket.text(LiveVoiceProtocol.start(profile,requireReview))
             var sessionStarted=false
             val initialDeadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(20)
             while(!closed.get()) {
@@ -79,8 +86,17 @@ internal class LiveVoiceEngine(
                     }
                     is LiveVoiceProtocol.Event.ClearAudio -> if(sessionStarted) clearPlayback(event.epoch)
                     LiveVoiceProtocol.Event.Closed -> return
-                    LiveVoiceProtocol.Event.Error -> throw Setup("The endpoint rejected or interrupted the GPT-Live session. Check the service type, API key, and Live endpoint.")
-                    is LiveVoiceProtocol.Event.InputTranscript, is LiveVoiceProtocol.Event.Delegation ->
+                    is LiveVoiceProtocol.Event.CommentaryAck ->
+                        completeReadback(event.clientEventId,LiveReadback.Delivery.ACCEPTED)
+                    is LiveVoiceProtocol.Event.CommandError -> {
+                        if(!completeReadback(event.clientEventId,LiveReadback.Delivery.REJECTED) &&
+                            !event.clientEventId.startsWith("pocket-readback-")) {
+                            throw Setup("The endpoint rejected or interrupted the Live session. Check the service type, API key, and Live endpoint.")
+                        }
+                    }
+                    LiveVoiceProtocol.Event.Error -> throw Setup("The endpoint rejected or interrupted the Live session. Check the service type, API key, and Live endpoint.")
+                    is LiveVoiceProtocol.Event.InputTranscript, is LiveVoiceProtocol.Event.InputCommit,
+                    is LiveVoiceProtocol.Event.Delegation ->
                         if(sessionStarted && !finishing.get()) onEvent(event)
                     LiveVoiceProtocol.Event.Ignore -> Unit
                 }
@@ -217,6 +233,27 @@ internal class LiveVoiceEngine(
         close()
     }
 
+    fun readbackEpoch():Long=readbackGeneration.get()
+
+    suspend fun appendReadback(id:String,text:String,epoch:Long):LiveReadback.Delivery {
+        if(epoch!=readbackEpoch() || !ready.get() || closed.get() || finishing.get())
+            return LiveReadback.Delivery.INTERRUPTED
+        val eventId="pocket-readback-"+java.util.UUID.randomUUID()
+        val message=LiveVoiceProtocol.readback(profile,id,text,eventId) ?: return LiveReadback.Delivery.REJECTED
+        val pending=PendingReadback(eventId,CompletableDeferred())
+        if(!readbackPending.compareAndSet(null,pending)) return LiveReadback.Delivery.UNCONFIRMED
+        try {
+            if(epoch!=readbackEpoch() || closed.get() || finishing.get()) return LiveReadback.Delivery.INTERRUPTED
+            if(runCatching {socket.text(message)}.isFailure) return LiveReadback.Delivery.UNCONFIRMED
+            return withTimeoutOrNull(5_000) {pending.acknowledgement.await()} ?: LiveReadback.Delivery.UNCONFIRMED
+        } finally {readbackPending.compareAndSet(pending,null)}
+    }
+
+    private fun completeReadback(eventId:String,delivery:LiveReadback.Delivery):Boolean {
+        val pending=readbackPending.get()?.takeIf {it.eventId==eventId} ?: return false
+        return pending.acknowledgement.complete(delivery)
+    }
+
     fun commentary(id:String,text:String) {
         if(ready.get() && !closed.get() && !finishing.get()) {
             socket.text(LiveVoiceProtocol.commentary(id,text,"pocket-"+java.util.UUID.randomUUID()))
@@ -244,6 +281,7 @@ internal class LiveVoiceEngine(
     }
 
     private fun clearPlayback(remoteEpoch:Long?) {
+        readbackGeneration.incrementAndGet()
         synchronized(audioGate) {
             chunks.clear(remoteEpoch)
             playback.get()?.let {
@@ -266,6 +304,8 @@ internal class LiveVoiceEngine(
 
     override fun close() {
         if(!closed.compareAndSet(false,true)) return
+        readbackGeneration.incrementAndGet()
+        readbackPending.getAndSet(null)?.acknowledgement?.complete(LiveReadback.Delivery.UNCONFIRMED)
         key.set(null)
         socket.close()
         stopAudio()

@@ -41,8 +41,7 @@ internal object LiveStructuredHistory {
         if(fresh.size!=1 || fresh.single().prompt!=prompt) return LiveCodexHistory.Match.Uncertain
         val answer=fresh.single().final ?: return LiveCodexHistory.Match.Waiting
         if(answer.any {it.isISOControl() && it !in "\n\t"}) return LiveCodexHistory.Match.Uncertain
-        val draft=LiveAgentHerdr.compactExcerpt(answer)
-        return if(LiveAgentHerdr.validShare(draft)) LiveCodexHistory.Match.Completed(draft) else LiveCodexHistory.Match.Uncertain
+        return if(LiveReadback.validText(answer)) LiveCodexHistory.Match.Completed(answer) else LiveCodexHistory.Match.Uncertain
     }
 
     fun command(binding:Binding):String {

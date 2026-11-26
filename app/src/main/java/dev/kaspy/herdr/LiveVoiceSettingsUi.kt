@@ -46,6 +46,10 @@ internal fun LiveVoiceServiceSettings(voice:PocketLiveVoice) {
     var model by remember(voice.extractorModel) {mutableStateOf(voice.extractorModel)}
     var extractorKey by remember(voice.extractorUrl) {mutableStateOf("")}
     var disableThinking by remember(voice.disableExtractionThinking) {mutableStateOf(voice.disableExtractionThinking)}
+    val normalizedEndpoint=LiveVoiceProtocol.normalizeEndpoint(endpoint.trim())
+    var requireReview by remember(voice.requireReview,profile,normalizedEndpoint) {
+        mutableStateOf(if(profile==voice.profile && normalizedEndpoint==voice.endpoint) voice.requireReview else true)
+    }
     Text("Choose a trusted Live service. For an OpenAI-backed service, keep the OpenAI project key on your proxy and use its client key here.")
     for (option in LiveVoiceProfile.entries) {
         TextButton(onClick={profile=option;key=""},enabled=profile!=option) {Text(when(option) {
@@ -60,7 +64,18 @@ internal fun LiveVoiceServiceSettings(voice:PocketLiveVoice) {
     if(profile!=LiveVoiceProfile.RELAY_TICKET) OutlinedTextField(value=key,onValueChange={key=it.take(2048)},
         label={Text("Live API key")},singleLine=true,visualTransformation=PasswordVisualTransformation(),
         keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Password),modifier=Modifier.fillMaxWidth())
-    Text("Codex, Claude Code, and OpenCode use stored replies over SSH, without an extraction model. For other agents, the optional service below receives visible terminal text. Only text you approve is shared with Live Voice.")
+    Row(Modifier.fillMaxWidth().heightIn(min=48.dp)
+        .toggleable(requireReview,role=Role.Checkbox,onValueChange={requireReview=it}),
+        verticalAlignment=Alignment.CenterVertically,
+        horizontalArrangement=Arrangement.spacedBy(10.dp),
+    ) {
+        Checkbox(checked=requireReview,onCheckedChange=null)
+        Column {
+            Text("Review agent requests and replies")
+            Text("When off, the selected agent may receive fresh voice requests and your Live endpoint may receive verified stored replies without asking, even while the screen is locked. Terminal approvals and screen-based replies still need review.")
+        }
+    }
+    Text("Codex, Claude Code, and OpenCode use stored replies over SSH, without an extraction model. For other agents, the optional service below receives visible terminal text.")
     OutlinedTextField(value=extractor,onValueChange={extractor=it.take(2048)},singleLine=true,
         label={Text("Extraction URL (full chat completions endpoint)")},modifier=Modifier.fillMaxWidth(),
         keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Uri))
@@ -82,7 +97,7 @@ internal fun LiveVoiceServiceSettings(voice:PocketLiveVoice) {
     }
     if(voice.settingsSaved) Text("Live Voice settings saved. Blank key fields keep the saved keys when their URLs are unchanged.")
     TextButton(onClick={
-        voice.configure(profile,endpoint.trim(),key.trim(),extractor.trim(),model.trim(),extractorKey.trim(),disableThinking)
+        voice.configure(profile,endpoint.trim(),key.trim(),extractor.trim(),model.trim(),extractorKey.trim(),disableThinking,requireReview)
         key="";extractorKey=""
     },enabled=LiveVoiceProtocol.normalizeEndpoint(endpoint.trim())!=null &&
         PocketLiveVoice.extractionSettingsValid(extractor.trim(),model.trim()) &&
@@ -125,7 +140,9 @@ internal fun LiveVoiceDialogs(voice:PocketLiveVoice) {
         PocketDialog(onDismissRequest=voice::cancelTicket,title={Text("Start Live Voice?")},
             text={
                 Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(10.dp)) {
-                    Text("Microphone audio goes to your Live endpoint. Codex, Claude Code, and OpenCode use stored replies over SSH. Other agents use the optional extraction service, which receives visible terminal snapshots. Pocket asks before submitting a prompt or sharing a reply.")
+                    Text("Microphone audio goes to your Live endpoint. Codex, Claude Code, and OpenCode use stored replies over SSH. Other agents use the optional extraction service, which receives visible terminal snapshots.")
+                    Text(if(voice.requireReview) "Pocket asks before submitting a prompt or sharing a reply."
+                        else "Review is off: Pocket can send fresh voice requests and read verified stored replies without asking. Terminal approvals and screen-based replies still need review.")
                     Text("A call stays on when the screen locks. When Android allows notifications, you can end it from the Live Voice notification.")
                     Text("Live: "+(voice.endpoint.orEmpty()))
                     if(voice.extractorUrl.isNotEmpty()) Text("Optional extractor: "+voice.extractorUrl)
@@ -155,7 +172,11 @@ internal fun LiveVoiceDialogs(voice:PocketLiveVoice) {
         val question=review.kind==PocketLiveReview.Kind.QUESTION
         var text by remember(review) {mutableStateOf(review.draft)}
         val content=text.trim()
-        val valid=if(prompt) LiveAgentHerdr.validPrompt(content) else LiveAgentHerdr.validShare(content)
+        val valid=when {
+            prompt -> LiveAgentHerdr.validPrompt(content)
+            review.readbackProfile!=null -> LiveReadback.plan(review.readbackProfile,content)!=null
+            else -> LiveAgentHerdr.validShare(content)
+        }
         val dismiss={voice.resolveReview(review,null)}
         PocketDialog(onDismissRequest=dismiss,title={Text(if(prompt) "Send to this agent?" else if(question) "Read the agent’s question aloud?" else "Share agent result?")},
             text={
@@ -165,10 +186,21 @@ internal fun LiveVoiceDialogs(voice:PocketLiveVoice) {
                         else if(review.draft.isBlank()) "Herdr reported completion, but Pocket could not isolate a new reply. You can type a short summary or skip sharing."
                         else "Review this draft and remove anything private before sharing it with Live Voice.")
                     review.evidence?.let { if(!question) Text("Seen in terminal: $it") }
-                    OutlinedTextField(value=text,onValueChange={text=it.take(4000)},
+                    OutlinedTextField(value=text,onValueChange={next ->
+                        if(review.readbackProfile!=null) text=next
+                        else text=next.take(4000)
+                    },
                         label={Text(if(prompt) "Agent prompt" else "Text to share")},
                         minLines=2,maxLines=5,modifier=Modifier.fillMaxWidth())
-                    if(!prompt && content.toByteArray(Charsets.UTF_8).size>350) Text("Shorten the excerpt before sharing.")
+                    when(review.readbackProfile) {
+                        LiveVoiceProfile.FOSS_LIVE -> {
+                            Text("FOSS-Live can read up to 16,000 UTF-8 bytes per result, including separators. It removes formatting and fenced code before speech.")
+                            if(!valid) Text("Choose a shorter excerpt. Pocket has not cut or sent this reply.")
+                        }
+                        LiveVoiceProfile.GPT_LIVE, LiveVoiceProfile.RELAY_TICKET ->
+                            Text("GPT-Live accepts up to 500 tokens per event and may paraphrase. Shorten the text if the endpoint rejects it.")
+                        null -> if(!prompt && content.toByteArray(Charsets.UTF_8).size>350) Text("Shorten the excerpt before sharing.")
+                    }
                     if(prompt && content.isNotEmpty() && !valid) Text("Use one line without terminal control keys.")
                 }
             },
