@@ -33,7 +33,11 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 
-internal enum class LiveVoiceUiPhase { IDLE, CONNECTING, LISTENING, SPEAKING }
+internal enum class LiveVoiceUiPhase {
+    IDLE, CONNECTING, LISTENING, SPEAKING;
+
+    val showTerminalTypingControls: Boolean get() = this == IDLE
+}
 
 @Composable internal fun LiveVoiceToolbarButton(
     enabled:Boolean, phase:LiveVoiceUiPhase, audioLevel:Float, onToggle:()->Unit,

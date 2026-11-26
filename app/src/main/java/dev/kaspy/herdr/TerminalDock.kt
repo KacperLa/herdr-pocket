@@ -85,7 +85,8 @@ internal fun TerminalDock(
     var directionsExpanded by remember(terminalIdentity,active) { mutableStateOf(false) }
     fun canSend()=active && m.speechTerminalIdentity()===terminalIdentity
     BackHandler(enabled=directionsExpanded) { directionsExpanded=false }
-    TerminalDictationControls(enabled=inputEnabled && m.dictationEnabled && m.liveVoice.phase==LiveVoiceUiPhase.IDLE,terminalIdentity=m::speechTerminalIdentity,send=m::sendDictation,pressEnter=m.dictationPressEnter,
+    val showTypingControls=m.liveVoice.phase.showTerminalTypingControls
+    TerminalDictationControls(enabled=inputEnabled && m.dictationEnabled && showTypingControls,terminalIdentity=m::speechTerminalIdentity,send=m::sendDictation,pressEnter=m.dictationPressEnter,
         onExclusiveDock={directionsExpanded=false},buttonEnabled=!opening) { mic ->
         Surface(
             modifier=Modifier.fillMaxWidth().padding(horizontal=8.dp,vertical=5.dp),
@@ -98,7 +99,7 @@ internal fun TerminalDock(
                     modifier=Modifier.fillMaxWidth().padding(horizontal=6.dp,vertical=4.dp),
                     verticalAlignment=Alignment.CenterVertically,
                 ) {
-                    // Keep mic and keyboard in place; all other keys scroll on a narrow cover display.
+                    // Only editing shortcuts scroll; reserve room for the trailing controls first.
                     Row(
                         modifier=Modifier.weight(1f).horizontalScroll(rememberScrollState()),
                         horizontalArrangement=Arrangement.spacedBy(5.dp),
@@ -123,6 +124,8 @@ internal fun TerminalDock(
                             directionsExpanded=false
                             if(canSend())onPaste()
                         }
+                    }
+                    Row(verticalAlignment=Alignment.CenterVertically) {
                         DirectionKeys(
                             active=active,
                             expanded=directionsExpanded,
@@ -130,14 +133,16 @@ internal fun TerminalDock(
                             onKey={if(canSend())onKey(it)},
                             terminalIdentity=terminalIdentity,
                         )
+                        if(m.liveVoice.routeIdentity()!=null) LiveVoiceDockControl(m.liveVoice,inputEnabled)
+                        if(showTypingControls) {
+                            mic()
+                            TerminalDockIconKey(
+                                R.drawable.ic_terminal_keyboard,
+                                if(keyboardShownOrRequested) R.string.terminal_hide_keyboard else R.string.terminal_show_keyboard,
+                                enabled=inputEnabled && !m.demo,
+                            ) {directionsExpanded=false;onToggleKeyboard()}
+                        }
                     }
-                    if(m.liveVoice.routeIdentity()!=null) LiveVoiceDockControl(m.liveVoice,inputEnabled)
-                    mic()
-                    TerminalDockIconKey(
-                        R.drawable.ic_terminal_keyboard,
-                        if(keyboardShownOrRequested) R.string.terminal_hide_keyboard else R.string.terminal_show_keyboard,
-                        enabled=inputEnabled && !m.demo,
-                    ) {directionsExpanded=false;onToggleKeyboard()}
                 }
             }
         }
