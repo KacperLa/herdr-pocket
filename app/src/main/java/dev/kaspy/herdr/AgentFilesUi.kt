@@ -92,6 +92,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -153,6 +157,47 @@ private fun OverflowDotsButton(buttonSize: Dp, label: String, onOpenMenu: () -> 
 }
 
 @Composable
+private fun CodexProgressPanel(anchor:Any,read:(suspend (Any)->CodexProgress.Snapshot),enabled:Boolean) {
+    var expanded by remember(anchor) { mutableStateOf(false) }
+    var snapshot by remember(anchor,expanded) { mutableStateOf<CodexProgress.Snapshot?>(null) }
+    val lifecycle=LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(anchor,expanded,enabled,lifecycle) {
+        if(expanded && enabled) lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            try {
+                while(true) {
+                    snapshot=read(anchor)
+                    delay(5_000)
+                }
+            } finally { snapshot=null }
+        }
+    }
+    Surface(Modifier.fillMaxWidth(),shape=PocketPanelShape,color=PocketBlack,border=BorderStroke(1.dp,PocketOutline)) {
+        Column(Modifier.padding(horizontal=12.dp,vertical=4.dp)) {
+            TextButton(onClick={expanded=!expanded},enabled=enabled || expanded,modifier=Modifier.fillMaxWidth().heightIn(min=48.dp)) {
+                Text(stringResource(if(expanded) R.string.codex_progress_hide else R.string.codex_progress_show))
+            }
+            if(expanded) {
+                val current=snapshot
+                val status=when(current?.availability) {
+                    null -> R.string.codex_progress_loading
+                    CodexProgress.Availability.NO_SESSION -> R.string.codex_progress_no_session
+                    CodexProgress.Availability.UNAVAILABLE -> R.string.codex_progress_unavailable
+                    CodexProgress.Availability.AVAILABLE -> if(current.messages.isEmpty()) R.string.codex_progress_empty
+                        else R.string.codex_progress_saved
+                }
+                Text(stringResource(status),style=MaterialTheme.typography.bodyMedium,
+                    modifier=Modifier.padding(horizontal=4.dp,vertical=8.dp))
+                current?.messages?.forEach { message ->
+                    HorizontalDivider()
+                    Text(message,style=MaterialTheme.typography.bodyLarge,
+                        modifier=Modifier.padding(horizontal=4.dp,vertical=10.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
 internal fun AgentMenuScreen(
     agentName: String,
     details: CoreSession?,
@@ -164,6 +209,8 @@ internal fun AgentMenuScreen(
     onRefresh: () -> Unit,
     onOpenFiles: () -> Unit,
     onBack: () -> Unit,
+    progressAnchor: Any? = null,
+    readProgress: (suspend (Any) -> CodexProgress.Snapshot)? = null,
 ) {
     val title = displayFileName(agentName).ifBlank { stringResource(R.string.agent_menu_fallback_title) }
     val scheme = MaterialTheme.colorScheme
@@ -240,6 +287,9 @@ internal fun AgentMenuScreen(
                         HorizontalDivider()
                         AgentSettingDetail(R.string.agent_settings_path,summary?.path ?: empty)
                     }
+                }
+                if (progressAnchor != null && readProgress != null) {
+                    CodexProgressPanel(progressAnchor,readProgress,enabled=!refreshing)
                 }
                 val cardColor = scheme.onSurface
                 Surface(

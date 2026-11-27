@@ -176,7 +176,7 @@ class TuiAgentsTest {
             run(TuiAgents.listCommand("coding.dev"),fixture="legacy").let { (data,calls) ->
                 assertEquals(listOf("api snapshot","agent list","pane list","tab list","workspace list")
                     .map {"--session coding.dev $it"},calls)
-                assertEquals("Codex 1",TuiAgents.parse(data).single().name)
+                assertEquals("Codex · 1",TuiAgents.parse(data).single().name)
             }
             assertEquals(listOf("--session coding.dev terminal attach term_abc"),
                 run(TuiAgents.attachCommand("term_abc","coding.dev")).second)
@@ -221,7 +221,7 @@ class TuiAgentsTest {
           ]
         }}}"""
         val roster=TuiAgents.parse(payload)
-        assertEquals(listOf("Release console","Release console","Release console","Codex 1","Codex 1","8","Codex 1"),
+        assertEquals(listOf("Release console","Release console","Release console","Codex · 1","Codex · 1","8","Codex · 1"),
             roster.filter {it.isAgent}.map {it.name})
         assertEquals("explicit_name",roster.first().tuiAgentName)
         assertNull(roster[1].tuiAgentName)
@@ -252,7 +252,7 @@ class TuiAgentsTest {
         assertEquals(AgentSelection.RESUME_CURRENT,agentSelection(beforeShells.first(),original,"term_shell",id,id))
         val current=TuiAgents.parse(snapshot(agent))
         val (agents,shells)=groupedLiveRoster(current)
-        assertEquals(listOf("now-coding 1"),agents.map {it.name})
+        assertEquals(listOf("now-coding · 1"),agents.map {it.name})
         assertEquals(listOf("term_other"),shells.map {it.address})
         assertEquals(AgentSelection.RESUME_CURRENT,agentSelection(agents.single(),current,"term_shell",id,id))
     }
@@ -345,11 +345,11 @@ class TuiAgentsTest {
         val first="""{"workspace_id":"w","tab_id":"t9","number":9,"label":"1"}"""
         val second="""{"workspace_id":"w","tab_id":"t3","number":3,"label":"2"}"""
         val originals=roster("$first,$second")
-        assertEquals(listOf("Codex 1","reviewer 2"),originals.map {it.name})
+        assertEquals(listOf("Codex · 1","reviewer · 2"),originals.map {it.name})
         assertEquals(originals.map {it.name},originals.map {it.spacesName})
         assertEquals("Review",roster(first.replace(":\"1\"",":\"Review\"")+",$second").first().name)
         assertEquals("1",roster(first.dropLast(1)+""","custom_label":true}"""+",$second").first().name)
-        assertEquals("Codex 1",roster("").first().name)
+        assertEquals("Codex · 1",roster("").first().name)
     }
 
     @Test fun unnamedFirstTabKeepsTheSameSpacesLabelWhenAnotherTabIsAdded() {
@@ -390,7 +390,7 @@ class TuiAgentsTest {
         }}}"""
         val roster=TuiAgents.parse(payload)
         val space=spacesRoster(roster).single()
-        assertEquals(listOf("Release · Manual shell · 1","Release","Claude Code 2","Terminal · 3"),
+        assertEquals(listOf("Release · Manual shell · 1","Release","Claude Code · 2","Terminal · 3"),
             space.rows.map {it.spacesName})
         assertEquals("/repos/release",space.rows.first().spacesPath)
         assertEquals("Release",priorityAgentRoster(roster).first().name)

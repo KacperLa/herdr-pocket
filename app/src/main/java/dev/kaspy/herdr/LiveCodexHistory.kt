@@ -74,24 +74,65 @@ internal object LiveCodexHistory {
         data class Completed(val draft: String): Match
     }
 
-    fun match(baseline: Page, after: Page, reviewedPrompt: String): Match {
-        val oldHead = baseline.turns.firstOrNull()?.id
-        val boundary = if (oldHead == null) {
-            if (baseline.hasOlder || after.hasOlder) return Match.Uncertain
+    private sealed interface Candidate {
+        data object Waiting:Candidate
+        data object Uncertain:Candidate
+        data class Found(val turn:Turn,val items:List<JSONObject>):Candidate
+    }
+
+    private fun candidate(baseline:Page,after:Page,reviewedPrompt:String,completedOnly:Boolean):Candidate {
+        val oldHead=baseline.turns.firstOrNull()?.id
+        val boundary=if(oldHead==null) {
+            if(baseline.hasOlder || after.hasOlder) return Candidate.Uncertain
             after.turns.size
-        } else after.turns.indexOfFirst { it.id == oldHead }.takeIf { it >= 0 } ?: return Match.Uncertain
-        if (boundary == 0) return Match.Waiting
-        // One new persisted turn only. We cannot identify who sent two identical prompts.
-        if (boundary != 1) return Match.Uncertain
-        val candidate = after.turns.first()
-        // The reader may call another process's unfinished turn interrupted until it is committed.
-        if (candidate.status != "completed") return Match.Waiting
-        val items = (0 until candidate.rawItems.length()).map { candidate.rawItems.optJSONObject(it) ?: return Match.Uncertain }
-        val user = items.filter { it.opt("type") == "userMessage" }.singleOrNull() ?: return Match.Uncertain
-        val parts = user.optJSONArray("content") ?: return Match.Uncertain
-        val part = parts.optJSONObject(0) ?: return Match.Uncertain
-        if (parts.length() != 1 || part.opt("type") != "text" || part.opt("text") != reviewedPrompt)
-            return Match.Uncertain
+        } else after.turns.indexOfFirst {it.id==oldHead}.takeIf {it>=0} ?: return Candidate.Uncertain
+        if(boundary==0) return Candidate.Waiting
+        if(boundary!=1) return Candidate.Uncertain
+        val turn=after.turns.first()
+        // A separate app-server may label another process's in-flight turn interrupted.
+        if(completedOnly && turn.status!="completed") return Candidate.Waiting
+        val items=(0 until turn.rawItems.length()).map {turn.rawItems.optJSONObject(it) ?: return Candidate.Uncertain}
+        // No published user item yet: wait. A different or ambiguous prompt is not ours.
+        val users=items.filter {it.opt("type")=="userMessage"}
+        if(!completedOnly && users.isEmpty()) return Candidate.Waiting
+        val user=users.singleOrNull() ?: return Candidate.Uncertain
+        val parts=user.optJSONArray("content") ?: return Candidate.Uncertain
+        val part=parts.optJSONObject(0) ?: return Candidate.Uncertain
+        if(parts.length()!=1 || part.opt("type")!="text" || part.opt("text")!=reviewedPrompt)
+            return Candidate.Uncertain
+        return Candidate.Found(turn,items)
+    }
+
+    /** One feed per acknowledged delegation. Ambiguous history stops progress, not final readback. */
+    class Progress(private val baseline:Page,private val prompt:String) {
+        private var turnId:String?=null
+        private var stopped=false
+        private val sent=HashSet<String>()
+
+        fun next(page:Page):String? {
+            if(stopped || sent.size>=20) return null
+            return when(val match=candidate(baseline,page,prompt,completedOnly=false)) {
+                Candidate.Waiting -> null
+                Candidate.Uncertain -> {stopped=true;null}
+                is Candidate.Found -> {
+                    val turn=match.turn
+                    if(turnId!=null && turn.id!=turnId) {stopped=true;return null}
+                    turnId=turn.id
+                    if(turn.status !in setOf("inProgress","interrupted") ||
+                        match.items.any {it.opt("type")=="agentMessage" && it.opt("phase")=="final_answer"}) return null
+                    val latest=CodexProgress.from(page).messages.lastOrNull() ?: return null
+                    latest.takeIf {LiveReadback.validText(it) && sent.add(it)}
+                }
+            }
+        }
+    }
+
+    fun match(baseline:Page,after:Page,reviewedPrompt:String):Match {
+        val items=when(val match=candidate(baseline,after,reviewedPrompt,completedOnly=true)) {
+            Candidate.Waiting -> return Match.Waiting
+            Candidate.Uncertain -> return Match.Uncertain
+            is Candidate.Found -> match.items
+        }
         val last = items.lastOrNull { it.opt("type") == "agentMessage" } ?: return Match.Uncertain
         if (last.opt("phase") != "final_answer") return Match.Uncertain
         val reply = (last.opt("text") as? String)?.trim()?.takeIf { it.isNotBlank() } ?: return Match.Uncertain

@@ -36,6 +36,26 @@ class LiveVoiceProtocolTest {
             """{"type":"session.started","session":{"id":"live_fixture","audio":{"format":{"type":"audio/pcmu","rate":8000}}}}"""))
     }
 
+    @Test fun progressAcknowledgementAndRecoverableFossWarningAreSeparate() {
+        val id="pocket-progress-fixture"
+        val ack=LiveVoiceProtocol.parse("""{"type":"session.thinking.appended","client_event_id":"$id"}""")
+        assertEquals(LiveVoiceProtocol.Event.ProgressAck(id),ack)
+        val rejection=LiveVoiceProtocol.parse("""{"type":"error","error":{"type":"invalid_request_error","code":"event_not_permitted","client_event_id":"$id"}}""")
+        assertEquals(LiveVoiceProtocol.Event.CommandError(id),rejection)
+        val warning=LiveVoiceProtocol.parse("""{"type":"error","error":{"type":"server_error","code":"speech_http","message":"private text"}}""")
+            as LiveVoiceProtocol.Event.OperationFault
+        assertEquals(LiveVoiceProtocol.VoiceFault.SPEECH_HTTP,warning.fault)
+        assertTrue(warning.fault.recoverable(LiveVoiceProfile.FOSS_LIVE,true))
+        assertFalse(warning.fault.recoverable(LiveVoiceProfile.FOSS_LIVE,false))
+        assertFalse(warning.fault.recoverable(LiveVoiceProfile.GPT_LIVE,true))
+        assertFalse(warning.toString().contains("private text"))
+        assertEquals(LiveVoiceProtocol.Event.Error,LiveVoiceProtocol.parse(
+            """{"type":"error","error":{"type":"server_error","code":"unknown-with-private-text"}}"""))
+        assertEquals(LiveVoiceProtocol.Event.Error,LiveVoiceProtocol.parse(
+            """{"type":"error","error":{"type":"invalid_request_error","code":"speech_http"}}"""))
+        assertEquals(LiveVoiceProtocol.Event.Closed,LiveVoiceProtocol.parse("""{"type":"session.closed"}"""))
+    }
+
     @Test fun audioIsPcmPayloadAndUntrustedCommandsAreNotInterpreted() {
         val pcm=byteArrayOf(0,1,2,-1)
         val wire=JSONObject(LiveVoiceProtocol.audio(pcm,pcm.size))

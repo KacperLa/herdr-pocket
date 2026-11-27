@@ -47,6 +47,10 @@ internal fun LiveVoiceServiceSettings(voice:PocketLiveVoice) {
     var extractorKey by remember(voice.extractorUrl) {mutableStateOf("")}
     var disableThinking by remember(voice.disableExtractionThinking) {mutableStateOf(voice.disableExtractionThinking)}
     val normalizedEndpoint=LiveVoiceProtocol.normalizeEndpoint(endpoint.trim())
+    var shareCodexProgress by remember(voice.shareCodexProgress,profile,normalizedEndpoint) {
+        mutableStateOf(profile==LiveVoiceProfile.FOSS_LIVE && profile==voice.profile &&
+            normalizedEndpoint==voice.endpoint && voice.shareCodexProgress)
+    }
     var requireReview by remember(voice.requireReview,profile,normalizedEndpoint) {
         mutableStateOf(if(profile==voice.profile && normalizedEndpoint==voice.endpoint) voice.requireReview else true)
     }
@@ -75,6 +79,17 @@ internal fun LiveVoiceServiceSettings(voice:PocketLiveVoice) {
             Text("When off, the selected agent may receive fresh voice requests and your Live endpoint may receive verified stored replies without asking, even while the screen is locked. Terminal approvals and screen-based replies still need review.")
         }
     }
+    if(profile==LiveVoiceProfile.FOSS_LIVE) {
+        Row(Modifier.fillMaxWidth().heightIn(min=48.dp)
+            .toggleable(shareCodexProgress,role=Role.Checkbox,onValueChange={shareCodexProgress=it}),
+            verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(10.dp)) {
+            Checkbox(checked=shareCodexProgress,onCheckedChange=null)
+            Column {
+                Text("Share Codex progress with Live Voice")
+                Text("Automatically sends Codex progress for requests started in this call to your FOSS-Live endpoint, even while the screen is locked. Your review setting for requests and replies is unchanged.")
+            }
+        }
+    }
     Text("Codex, Claude Code, OpenCode, and nobs use stored replies over SSH, without an extraction model. For other agents, the optional service below receives visible terminal text.")
     OutlinedTextField(value=extractor,onValueChange={extractor=it.take(2048)},singleLine=true,
         label={Text("Extraction URL (full chat completions endpoint)")},modifier=Modifier.fillMaxWidth(),
@@ -97,7 +112,7 @@ internal fun LiveVoiceServiceSettings(voice:PocketLiveVoice) {
     }
     if(voice.settingsSaved) Text("Live Voice settings saved. Blank key fields keep the saved keys when their URLs are unchanged.")
     TextButton(onClick={
-        voice.configure(profile,endpoint.trim(),key.trim(),extractor.trim(),model.trim(),extractorKey.trim(),disableThinking,requireReview)
+        voice.configure(profile,endpoint.trim(),key.trim(),extractor.trim(),model.trim(),extractorKey.trim(),disableThinking,requireReview,shareCodexProgress)
         key="";extractorKey=""
     },enabled=LiveVoiceProtocol.normalizeEndpoint(endpoint.trim())!=null &&
         PocketLiveVoice.extractionSettingsValid(extractor.trim(),model.trim()) &&
@@ -143,6 +158,8 @@ internal fun LiveVoiceDialogs(voice:PocketLiveVoice) {
                     Text("Microphone audio goes to your Live endpoint. Codex, Claude Code, OpenCode, and nobs use stored replies over SSH. Other agents use the optional extraction service, which receives visible terminal snapshots.")
                     Text(if(voice.requireReview) "Pocket asks before submitting a prompt or sharing a reply."
                         else "Review is off: Pocket can send fresh voice requests and read verified stored replies without asking. Terminal approvals and screen-based replies still need review.")
+                    if(voice.profile==LiveVoiceProfile.FOSS_LIVE && voice.shareCodexProgress)
+                        Text("Codex progress for requests from this call is shared automatically with your FOSS-Live endpoint.")
                     Text("A call stays on when the screen locks. When Android allows notifications, you can end it from the Live Voice notification.")
                     Text("Live: "+(voice.endpoint.orEmpty()))
                     if(voice.extractorUrl.isNotEmpty()) Text("Optional extractor: "+voice.extractorUrl)

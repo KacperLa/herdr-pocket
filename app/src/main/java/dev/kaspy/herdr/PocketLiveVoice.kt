@@ -36,6 +36,7 @@ internal class PocketLiveVoice(
     private val handler=Handler(Looper.getMainLooper())
     private data class Lease(
         val anchor:TuiLiveAnchor,val profile:LiveVoiceProfile,val ignoreBottomLines:Int,val requireReview:Boolean,
+        val shareCodexProgress:Boolean,
     ) {
         var foreground:LiveVoiceForegroundLeaseGate.Lease?=null
         var routeWatch:Job?=null
@@ -77,6 +78,9 @@ internal class PocketLiveVoice(
         LiveVoiceProfile.valueOf(prefs.getString("live_profile","RELAY_TICKET").orEmpty())
     }.getOrDefault(LiveVoiceProfile.RELAY_TICKET))
         private set
+    // The saved endpoint and selected protocol determine whether the toolbar can offer Start.
+    val canStartFromDock:Boolean get() = endpoint!=null &&
+        (profile==LiveVoiceProfile.RELAY_TICKET || prefs.getString("live_bearer",null)!=null)
     var extractorUrl by mutableStateOf(prefs.getString("live_extractor_endpoint","").orEmpty())
         private set
     var extractorModel by mutableStateOf(prefs.getString("live_extractor_model","").orEmpty())
@@ -84,6 +88,8 @@ internal class PocketLiveVoice(
     var disableExtractionThinking by mutableStateOf(prefs.getBoolean("live_extractor_disable_thinking",false))
         private set
     var requireReview by mutableStateOf(prefs.getBoolean("live_require_review",true))
+        private set
+    var shareCodexProgress by mutableStateOf(prefs.getBoolean("live_share_codex_progress",false))
         private set
     var settingsSaved by mutableStateOf(false)
         private set
@@ -132,7 +138,7 @@ internal class PocketLiveVoice(
     private fun extractorScope(url:String)="extractor\n$url"
 
     fun configure(profile:LiveVoiceProfile,url:String,key:String,extractor:String,model:String,extractorKey:String,
-        disableThinking:Boolean,requireReview:Boolean,
+        disableThinking:Boolean,requireReview:Boolean,shareCodexProgress:Boolean,
     ) {
         val normalized=LiveVoiceProtocol.normalizeEndpoint(url.trim()) ?: return
         if(!extractionSettingsValid(extractor,model)) return
@@ -150,10 +156,12 @@ internal class PocketLiveVoice(
         }
         stop()
         resetExtractionCheck()
+        val progressEnabled=profile==LiveVoiceProfile.FOSS_LIVE && shareCodexProgress
         val saved=prefs.edit().putString("live_profile",profile.name).putString("live_relay_endpoint",normalized)
             .putString("live_bearer",actualKey).putString("live_extractor_endpoint",extractor)
             .putString("live_extractor_model",model).putString("live_extractor_bearer",actualExtractor)
-            .putBoolean("live_extractor_disable_thinking",disableThinking).putBoolean("live_require_review",requireReview).commit()
+            .putBoolean("live_extractor_disable_thinking",disableThinking).putBoolean("live_require_review",requireReview)
+            .putBoolean("live_share_codex_progress",progressEnabled).commit()
         if(!saved) {notice="Could not save Live Voice settings.";return}
         this.profile=profile
         endpoint=normalized
@@ -161,6 +169,7 @@ internal class PocketLiveVoice(
         extractorModel=model
         disableExtractionThinking=disableThinking
         this.requireReview=requireReview
+        this.shareCodexProgress=progressEnabled
         settingsSaved=true
     }
 
@@ -169,13 +178,14 @@ internal class PocketLiveVoice(
         resetExtractionCheck()
         prefs.edit().remove("live_profile").remove("live_relay_endpoint").remove("live_bearer")
             .remove("live_extractor_endpoint").remove("live_extractor_model").remove("live_extractor_bearer")
-            .remove("live_extractor_disable_thinking").remove("live_require_review").commit()
+            .remove("live_extractor_disable_thinking").remove("live_require_review").remove("live_share_codex_progress").commit()
         profile=LiveVoiceProfile.RELAY_TICKET
         endpoint=null
         extractorUrl=""
         extractorModel=""
         disableExtractionThinking=false
         requireReview=true
+        shareCodexProgress=false
         settingsSaved=false
     }
 
@@ -215,7 +225,7 @@ internal class PocketLiveVoice(
             prefs.edit().let {if(bottom==0) it.remove(anchor.trimPreference) else it.putInt(anchor.trimPreference,bottom)}.apply()
         }
         ticketAnchor=null
-        val active=Lease(anchor,mode,bottom,requireReview)
+        val active=Lease(anchor,mode,bottom,requireReview,mode==LiveVoiceProfile.FOSS_LIVE && shareCodexProgress)
         lease=active
         diagnostics.call(mode,disableThinking,bottom)
         phase=LiveVoiceUiPhase.CONNECTING
@@ -349,6 +359,15 @@ internal class PocketLiveVoice(
                     handler.post {if(lease===active) level=amount}
                 },onEvent={ event ->
                     handler.post {if(lease===active && anchor.same(currentAnchor())) event(active,event)}
+                },onDiagnostic={ event ->
+                    handler.post {if(lease===active) diagnostics.event(event)}
+                },onWarning={ fault ->
+                    handler.post {
+                        if(lease===active && anchor.same(currentAnchor())) {
+                            diagnostics.voiceFault(fault)
+                            notice=fault.notice+" The call is still open. Pocket did not resend the task."
+                        }
+                    }
                 }).also {it.start()}
             } catch(cancelled:CancellationException) {
                 throw cancelled
@@ -490,9 +509,11 @@ internal class PocketLiveVoice(
                             diagnostics.event(LiveDiagnostics.Event.PROMPT_INVALID)
                             return@launch
                         }
+                        var codexProgress:LiveCodexHistory.Progress?=null
                         val compare: (suspend () -> LiveCodexHistory.Match?)? = if(structured==null) null else
                             if(structured.provider==LiveStructuredHistory.Provider.CODEX) {
                                 history(active,structured.id)?.let {baseline ->
+                                    if(active.shareCodexProgress) codexProgress=LiveCodexHistory.Progress(baseline,prompt)
                                     suspend {history(active,structured.id)?.let {LiveCodexHistory.match(baseline,it,prompt)}}
                                 }
                             } else {
@@ -519,7 +540,31 @@ internal class PocketLiveVoice(
                                 diagnostics.event(LiveDiagnostics.Event.PROMPT_SENT)
                                 if(structured!=null && compare!=null) {
                                     val label=structured.provider.label
-                                    val stored=active.route.finishStructured(before.status,compare)
+                                    var lastProgressPoll=System.nanoTime()
+                                    val stored=active.route.finishStructured(before.status,compare,onWorking={ working ->
+                                        val feed=codexProgress
+                                        val now=System.nanoTime()
+                                        if(feed!=null && now-lastProgressPoll>=5_000_000_000L) {
+                                            lastProgressPoll=now
+                                            // Progress is optional. A slow history read must not abort final readback.
+                                            try {
+                                                withTimeoutOrNull(3_000) {
+                                                    val page=history(active,structured.id)
+                                                    if(page!=null && active.route.current()==working) {
+                                                        feed.next(page)?.let { text ->
+                                                            ensure(active)
+                                                            val engine=active.engine
+                                                            withContext(Dispatchers.IO) {engine?.offerProgress(event.id,text)}
+                                                        }
+                                                    }
+                                                }
+                                            } catch(cancelled:CancellationException) {
+                                                throw cancelled
+                                            } catch(_:IOException) {
+                                                // Optional progress must not interfere with the ordinary result path.
+                                            }
+                                        }
+                                    })
                                     if(stored==null) {
                                         diagnostics.history(structured.provider,LiveDiagnostics.History.REPLY_UNVERIFIED)
                                         say(active,event.id,"Pocket could not verify a completed $label reply. Check the terminal for the reply, input request, or approval. No reply text was shared.")

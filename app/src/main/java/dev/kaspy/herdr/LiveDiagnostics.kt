@@ -10,6 +10,9 @@ import org.json.JSONObject
 internal class LiveDiagnostics(private val clock:()->Long={System.nanoTime()/1_000_000}) {
     enum class Event {
         SETTINGS_TEST_START, SETTINGS_TEST_PASSED, SETTINGS_TEST_FAILED, KEY_UNLOCK_FAILED,
+        PROGRESS_ATTEMPTED, PROGRESS_ACCEPTED, PROGRESS_REJECTED, PROGRESS_WRITE_FAILED,
+        LIVE_ENDPOINT_CLOSED, LIVE_TRANSPORT_ENDED, LIVE_PROTOCOL_FAILURE, LIVE_SOCKET_FAILURE,
+        LIVE_CAPTURE_OR_WRITE_FAILURE, LIVE_PLAYBACK_FAILURE,
         CALL_START, CALL_READY, CALL_END, LIVE_ERROR, HERDR_AGENT_MISSING, HERDR_STATUS_UNAVAILABLE,
         DELEGATION, DELEGATION_BUSY, HERDR_CAPTURE_UNAVAILABLE, PREFLIGHT,
         PROMPT_SKIPPED, PROMPT_INVALID, PROMPT_STALE, PROMPT_RECEIPT_UNKNOWN, PROMPT_SENT,
@@ -38,6 +41,9 @@ internal class LiveDiagnostics(private val clock:()->Long={System.nanoTime()/1_0
 
     @Synchronized fun event(event:Event,problem:LiveExtractionClient.Problem?=null) =
         append(event.label(),problem?.let {"problem="+it.label()})
+
+    @Synchronized fun voiceFault(fault:LiveVoiceProtocol.VoiceFault)=
+        append("live_provider_warning","operation="+fault.label())
 
     @Synchronized fun call(profile:LiveVoiceProfile,disableThinking:Boolean,ignoreBottomLines:Int=0)=
         append(Event.CALL_START.label(),"profile="+profile.label(),"thinking_off_requested=$disableThinking",

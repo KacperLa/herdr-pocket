@@ -184,12 +184,8 @@ internal class ImeInputView(
 
         val useFullEditor = isComposeModeActive && shortcutInputMode != ImeShortcutInputMode.TYPE_NULL
         if (useFullEditor) {
-            // Compose mode: allow voice input and IME suggestions.
-            // TYPE_CLASS_TEXT without NO_SUGGESTIONS keeps the suggestion strip (and its
-            // microphone button) visible. fullEditor=true makes BaseInputConnection provide
-            // a real Editable so getExtractedText() returns non-null (required by Gboard
-            // for voice input).
-            outAttrs.inputType = EditorInfo.TYPE_CLASS_TEXT
+            // Keep the full editable input connection for composition without predictive text.
+            outAttrs.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             if (shortcutInputMode == ImeShortcutInputMode.FORCE_ASCII) {
                 outAttrs.imeOptions = outAttrs.imeOptions or EditorInfo.IME_FLAG_FORCE_ASCII
             }

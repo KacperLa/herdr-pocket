@@ -1,0 +1,9 @@
+<resources>
+    <string name="codex_progress_show">Show Codex progress</string>
+    <string name="codex_progress_hide">Hide Codex progress</string>
+    <string name="codex_progress_loading">Checking for saved updates…</string>
+    <string name="codex_progress_no_session">Herdr has not reported this Codex session. On a shared daemon, launch Codex with --no-daemon.</string>
+    <string name="codex_progress_unavailable">Could not read Codex progress. Pocket will retry while this is open.</string>
+    <string name="codex_progress_empty">No commentary saved for the latest turn yet.</string>
+    <string name="codex_progress_saved">Latest saved turn · updates appear as Codex saves them</string>
+</resources>

@@ -11,12 +11,14 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 
 /**
- * One optional remembered passphrase. Call save only after successful SSH authentication
+ * One optional remembered passphrase per SSH connection. Call save only after successful SSH authentication
  * and explicit user opt-in. No passphrase, reusable key file, or exportable AES key is stored.
  * Use a background dispatcher for read/save/clear; wipe returned arrays after use.
  */
-class PassphraseVault(context: Context) {
-    private val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+class PassphraseVault(context: Context, connectionId: String? = SshHostProfiles.LEGACY) {
+    private val suffix=SshHostProfiles.vaultSuffix(connectionId)
+    private val keyAlias=KEY_ALIAS+suffix
+    private val prefs = context.applicationContext.getSharedPreferences(PREFS+suffix, Context.MODE_PRIVATE)
 
     fun hasSaved(): Boolean = synchronized(lock) {
         runCatching { stored() != null }.getOrDefault(false)
@@ -55,7 +57,7 @@ class PassphraseVault(context: Context) {
                 PassphraseCipher.encrypt(existingKey(store) ?: generateKey(), aad, passphrase)
             } catch (e: Exception) {
                 if (e !is KeyPermanentlyInvalidatedException && e !is UnrecoverableKeyException) throw e
-                store.deleteEntry(KEY_ALIAS)
+                store.deleteEntry(keyAlias)
                 PassphraseCipher.encrypt(generateKey(), aad, passphrase)
             }
             prefs.edit().putString(RECORD, sealed.encode()).commit()
@@ -64,12 +66,12 @@ class PassphraseVault(context: Context) {
         }
     }
 
-    /** Forget all remembered credentials, including their local app-owned Keystore key. */
+    /** Forget this connection’s remembered passphrase, including their local app-owned Keystore key. */
     fun clear(): Boolean = synchronized(lock) {
         val erased = runCatching { removeRecord() }.getOrDefault(false)
         val keyErased = runCatching {
             val store = keyStore()
-            if (store.containsAlias(KEY_ALIAS)) store.deleteEntry(KEY_ALIAS)
+            if (store.containsAlias(keyAlias)) store.deleteEntry(keyAlias)
             true
         }.getOrDefault(false)
         // Either confirmed action makes the old passphrase unrecoverable by this app.
@@ -83,11 +85,11 @@ class PassphraseVault(context: Context) {
 
     private fun keyStore(): KeyStore = KeyStore.getInstance(KEYSTORE).apply { load(null) }
 
-    private fun existingKey(store: KeyStore): SecretKey? = store.getKey(KEY_ALIAS, null) as? SecretKey
+    private fun existingKey(store: KeyStore): SecretKey? = store.getKey(keyAlias, null) as? SecretKey
 
     private fun generateKey(): SecretKey = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE).run {
         init(
-            KeyGenParameterSpec.Builder(KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+            KeyGenParameterSpec.Builder(keyAlias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
                 .setKeySize(256)
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)

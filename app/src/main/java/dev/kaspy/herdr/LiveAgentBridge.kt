@@ -171,6 +171,7 @@ internal object LiveAgentHerdr {
         suspend fun finishStructured(
             before:Status, compare:suspend ()->LiveCodexHistory.Match?,
             attempts:Int=100, pause:suspend ()->Unit={delay(1000)},
+            onWorking:suspend (Status)->Unit={},
         ):StoredReply? {
             var working = false
             var reads = 0
@@ -180,7 +181,10 @@ internal object LiveAgentHerdr {
                 val state = current() ?: return null
                 if (state.instance != before.instance || state.sequence < before.sequence || state.state == "blocked")
                     return null
-                if (state.state == "working" && state.sequence > before.sequence) working = true
+                if (state.state == "working" && state.sequence > before.sequence) {
+                    working = true
+                    onWorking(state)
+                }
                 val completion = state.completion?.let { it > maxOf(before.sequence, before.completion ?: 0uL) } == true
                 if (!state.ready || state.sequence <= before.sequence || !(working || completion)) {
                     stable = null

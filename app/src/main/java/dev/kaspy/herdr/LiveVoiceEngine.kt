@@ -27,6 +27,8 @@ internal class LiveVoiceEngine(
     private val onError:(String)->Unit,
     private val onLevel:(Float)->Unit={},
     private val onEvent:(LiveVoiceProtocol.Event)->Unit={},
+    private val onDiagnostic:(LiveDiagnostics.Event)->Unit={},
+    private val onWarning:(LiveVoiceProtocol.VoiceFault)->Unit={},
 ):AutoCloseable {
     private val key=AtomicReference<String?>(bearer)
     private val started=AtomicBoolean()
@@ -65,7 +67,10 @@ internal class LiveVoiceEngine(
             val initialDeadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(20)
             while(!closed.get()) {
                 if(!sessionStarted && System.nanoTime()>initialDeadline) throw Setup("The Live endpoint did not start a session.")
-                val message=socket.read() ?: throw IOException()
+                val message=socket.read() ?: run {
+                    onDiagnostic(LiveDiagnostics.Event.LIVE_TRANSPORT_ENDED)
+                    throw IOException()
+                }
                 when(val event=LiveVoiceProtocol.parse(message)) {
                     LiveVoiceProtocol.Event.Started -> {
                         if(sessionStarted) throw IOException()
@@ -85,10 +90,25 @@ internal class LiveVoiceEngine(
                         }) throw IOException()
                     }
                     is LiveVoiceProtocol.Event.ClearAudio -> if(sessionStarted) clearPlayback(event.epoch)
-                    LiveVoiceProtocol.Event.Closed -> return
+                    LiveVoiceProtocol.Event.Closed -> {
+                        if(!finishing.get()) onDiagnostic(LiveDiagnostics.Event.LIVE_ENDPOINT_CLOSED)
+                        return
+                    }
+                    is LiveVoiceProtocol.Event.ProgressAck ->
+                        if(event.clientEventId.startsWith(LiveVoiceProtocol.PROGRESS_EVENT_PREFIX))
+                            onDiagnostic(LiveDiagnostics.Event.PROGRESS_ACCEPTED)
+                    is LiveVoiceProtocol.Event.OperationFault -> {
+                        if(!event.fault.recoverable(profile,sessionStarted))
+                            throw Setup("The Live endpoint reported a voice error.")
+                        if(!finishing.get()) onWarning(event.fault)
+                    }
                     is LiveVoiceProtocol.Event.CommentaryAck ->
                         completeReadback(event.clientEventId,LiveReadback.Delivery.ACCEPTED)
                     is LiveVoiceProtocol.Event.CommandError -> {
+                        if(event.clientEventId.startsWith(LiveVoiceProtocol.PROGRESS_EVENT_PREFIX)) {
+                            onDiagnostic(LiveDiagnostics.Event.PROGRESS_REJECTED)
+                            continue
+                        }
                         if(!completeReadback(event.clientEventId,LiveReadback.Delivery.REJECTED) &&
                             !event.clientEventId.startsWith("pocket-readback-")) {
                             throw Setup("The endpoint rejected or interrupted the Live session. Check the service type, API key, and Live endpoint.")
@@ -102,8 +122,10 @@ internal class LiveVoiceEngine(
                 }
             }
         } catch(error:Setup) {
+            if(!closed.get() && !finishing.get()) onDiagnostic(LiveDiagnostics.Event.LIVE_PROTOCOL_FAILURE)
             fail(error.message.orEmpty())
         } catch(_:Exception) {
+            if(!closed.get() && !finishing.get()) onDiagnostic(LiveDiagnostics.Event.LIVE_SOCKET_FAILURE)
             fail("The Live voice connection ended. Check the endpoint and network, then try again.")
         } finally { close() }
     }
@@ -143,6 +165,7 @@ internal class LiveVoiceEngine(
                 }
             }
         } catch(_:Exception) {
+            if(!closed.get() && !finishing.get()) onDiagnostic(LiveDiagnostics.Event.LIVE_CAPTURE_OR_WRITE_FAILURE)
             fail("Microphone capture or the voice connection stopped. Check microphone access and try again.")
         } finally {
             data.fill(0)
@@ -201,6 +224,7 @@ internal class LiveVoiceEngine(
                 } finally {data.fill(0)}
             }
         } catch(_:Exception) {
+            if(!closed.get() && !finishing.get()) onDiagnostic(LiveDiagnostics.Event.LIVE_PLAYBACK_FAILURE)
             fail("Voice playback stopped. Check your audio output and try again.")
         } finally {
             runCatching {track?.pause()}
@@ -252,6 +276,16 @@ internal class LiveVoiceEngine(
     private fun completeReadback(eventId:String,delivery:LiveReadback.Delivery):Boolean {
         val pending=readbackPending.get()?.takeIf {it.eventId==eventId} ?: return false
         return pending.acknowledgement.complete(delivery)
+    }
+
+    fun offerProgress(id:String,text:String) {
+        if(profile!=LiveVoiceProfile.FOSS_LIVE || !ready.get() || closed.get() || finishing.get()) return
+        val eventId=LiveVoiceProtocol.PROGRESS_EVENT_PREFIX+java.util.UUID.randomUUID()
+        val message=LiveVoiceProtocol.progress(id,text,eventId) ?: return
+        // Log the attempt before the read thread can observe the ack.
+        onDiagnostic(LiveDiagnostics.Event.PROGRESS_ATTEMPTED)
+        if(runCatching {socket.text(message)}.isFailure)
+            onDiagnostic(LiveDiagnostics.Event.PROGRESS_WRITE_FAILED)
     }
 
     fun commentary(id:String,text:String) {

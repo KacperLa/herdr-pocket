@@ -235,7 +235,7 @@ internal object TuiAgents {
                     custom==null && (label.toULongOrNull()==null || position!=null && label!=position)))
                 return label
             val number=label?.takeIf {it.toULongOrNull()?.let {n -> n>0uL}==true} ?: position
-            return if(number==null) agentName else "$agentName $number"
+            return if(number==null) agentName else "$agentName · $number"
         }
 
         private fun paneOrdinal(location:TuiLocation):Int? =

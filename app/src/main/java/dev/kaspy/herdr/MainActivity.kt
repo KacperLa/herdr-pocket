@@ -18,7 +18,6 @@ import android.os.Looper
 import android.provider.DocumentsContract
 import android.webkit.MimeTypeMap
 import android.util.Base64
-import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -30,6 +29,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.calculateZoom
@@ -101,6 +101,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -126,23 +128,313 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
     }
     private val startupGate=StartupReconnect()
     private val resolver:ContentResolver=app.contentResolver
-    private val vault=PassphraseVault(app)
+    private var hostRegistry by mutableStateOf(SshHostProfiles.decode(prefs.getString("ssh_host_profiles_v1",null)))
+    internal val selectedHostId get()=hostRegistry.selected
+    private fun prefsFor(id:String?) =
+        getApplication<Application>().getSharedPreferences(SshHostProfiles.preferenceBucket(id),0)
+    private val hostPrefs get()=prefsFor(selectedHostId)
+    private fun vaultFor(id:String?)=PassphraseVault(getApplication<Application>(),id)
+    private val vault get()=vaultFor(selectedHostId)
+    private sealed interface KeyPickerOwner {
+        data class Active(val id:String,val generation:Long):KeyPickerOwner
+        data class Editor(val route:SshNavigation.Edit):KeyPickerOwner
+    }
+    private var keyPickerOwner:KeyPickerOwner?=null
+    internal var editorKey by mutableStateOf<Uri?>(null)
+        private set
+    internal var hostManageNotice by mutableStateOf("")
+        private set
+    private var profileRevision by mutableIntStateOf(0)
+    private var labelState by mutableStateOf(hostPrefs.getString("connection_label","").orEmpty())
+    internal var connectionLabel:String
+        get()=labelState
+        set(value) {if(!busy) labelState=value.filterNot(Char::isISOControl).take(64)}
+
+    internal val savedHosts:List<SavedSshHost> get() {
+        // SharedPreferences is not observable, so bump the revision on writes.
+        profileRevision
+        return hostRegistry.ids.map { id ->
+            val source=prefsFor(id)
+            val name=source.getString("connection_label","").orEmpty()
+            val endpoint=HostEndpoint.parse(source.getString("host","").orEmpty(),source.getString("port","22").orEmpty())
+            val login=source.getString("user","").orEmpty().trim()
+            SavedSshHost(id,name.ifBlank {endpoint?.display ?: "New connection"},
+                if(endpoint==null) "Not configured" else if(login.isBlank()) endpoint.display else "$login@${endpoint.display}",
+                endpoint!=null && login.isNotBlank())
+        }
+    }
+    private fun storeHostRegistry(next:SshHostProfiles,selectInMemory:Boolean=true):Boolean {
+        if(!prefs.edit().putString("ssh_host_profiles_v1",next.encode()).commit()) {
+            hostManageNotice="Could not save SSH connections. Please try again."
+            return false
+        }
+        if(selectInMemory) hostRegistry=next
+        return true
+    }
+
+    internal val canManageHosts get()=!busy || status=="Connected · SSH PTY"
+    internal val connectionIsOpen get()=displayedPty!=null || hasRosterConnection
+    private fun resetForHostSwitch() {
+        disconnect()
+        // Invalidate queued credential IO before changing the selected profile.
+        synchronized(vaultMutation) {credentialEpoch++}
+        terminalVisible=false
+        demo=false
+        clearRetainedOutput()
+        watchNotice=null
+        filesUploadNotice=null
+        nextRosterNotice=null
+        interruptedRosterNotice=null
+        replaceEmulator()
+    }
+
+    private fun loadHostForm() {
+        val source=hostPrefs
+        labelState=source.getString("connection_label","").orEmpty()
+        hostState=source.getString("host","").orEmpty()
+        portState=source.getString("port","22").orEmpty()
+        userState=source.getString("user","").orEmpty()
+        command=source.getString("command","herdr").orEmpty()
+        agentName=source.getString("agent","My agent").orEmpty()
+        tuiSessionState=source.getString("tui_session","").orEmpty()
+        val stored=source.getString("key_document_uri",null)?.let(Uri::parse)?.takeIf {it.scheme=="content"}
+        keyUri=stored?.takeIf {runCatching {hasReadGrant(it)}.getOrDefault(false)}
+        keyRemembered=keyUri!=null
+        if(stored!=null && keyUri==null) {
+            source.edit().remove("key_document_uri").commit()
+            vault.clear()
+        }
+        hasSavedPassphrase=selectedHostId!=null && vault.hasSaved()
+        credentialNotice=if(stored!=null && keyUri==null) "Key access expired. Select the file again." else ""
+        passphrase=""
+        saveTypedPassphrase=false
+        pinRevision++
+    }
+
+    internal fun clearHostManageNotice() {hostManageNotice=""}
+
+    internal var sshNavigation by mutableStateOf<SshNavigation>(SshNavigation.Session)
+        private set
+    internal fun openSshSettings() {
+        liveVoice.stop()
+        sshNavigation=SshNavigation.Settings
+    }
+    internal fun openAppSettings() {
+        sshNavigation=SshNavigation.AppSettings
+    }
+    internal fun backToSshConnections() {
+        clearHostManageNotice()
+        editorKey=null
+        sshNavigation=sshNavigation.back()
+    }
+    internal val canResumeConnection get()=terminalVisible || showAgentSwitcher
+    internal fun resumeConnection() {sshNavigation=SshNavigation.Session}
+    private fun showConnectedAgents() {
+        if(!showAgentSwitcher && canSwitchAgents) openAgentSwitcher()
+        if(showAgentSwitcher) resumeConnection()
+    }
+
+    internal fun editHost(id:String?) {
+        if(id!=null && id !in hostRegistry.ids) return
+        if(id==selectedHostId && id!=null) {
+            openSshSettings()
+            return
+        }
+        clearHostManageNotice()
+        if(id==null && hostRegistry.ids.size>=SshHostProfiles.MAX_HOSTS) {
+            hostManageNotice="Remove an unused connection before adding another."
+            return
+        }
+        editorKey=null
+        sshNavigation=SshNavigation.Edit(id)
+    }
+
+    internal fun hostEditorFields(id:String?):SshHostEditorFields {
+        if(id==null) return SshHostEditorFields()
+        val source=prefsFor(id)
+        return SshHostEditorFields(
+            source.getString("connection_label","").orEmpty(),
+            source.getString("host","").orEmpty(),
+            source.getString("port","22").orEmpty(),
+            source.getString("user","").orEmpty(),
+        )
+    }
+
+    internal fun saveEditedHost(id:String?,fields:SshHostEditorFields):Boolean {
+        val endpoint=HostEndpoint.parse(fields.host,fields.port)
+        if(endpoint==null || fields.user.isBlank() || fields.user.any(Char::isISOControl)) {
+            hostManageNotice="Enter a valid SSH host, port, and username."
+            return false
+        }
+        val target=id ?: java.util.UUID.randomUUID().toString()
+        if(id!=null && (id==selectedHostId || id !in hostRegistry.ids)) return false
+        val next=if(id==null) hostRegistry.add(target) else hostRegistry
+        if(next==null) {
+            hostManageNotice="Keep up to ${SshHostProfiles.MAX_HOSTS} saved connections. Remove an unused connection to add another."
+            return false
+        }
+        val source=prefsFor(target)
+        val previousKey=source.getString("key_document_uri",null)?.let(Uri::parse)
+        val chosenKey=editorKey
+        val keyChanged=chosenKey!=null && chosenKey!=previousKey
+        val destinationChanged=source.getString("host",null)!=endpoint.host ||
+            source.getString("port","22")!=endpoint.port.toString() ||
+            source.getString("user",null)!=fields.user.trim()
+        if(chosenKey!=null && !runCatching {
+            if(!hasReadGrant(chosenKey)) resolver.takePersistableUriPermission(chosenKey,Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            hasReadGrant(chosenKey)
+        }.getOrDefault(false)) {
+            hostManageNotice="Android could not remember this key. Choose the file again."
+            return false
+        }
+        val ok=source.edit().putString("host",endpoint.host).putString("port",endpoint.port.toString())
+            .putString("user",fields.user.trim())
+            .putString("connection_label",fields.name.filterNot(Char::isISOControl).take(64)).apply {
+                if(keyChanged) putString("key_document_uri",chosenKey.toString()).putBoolean("startup_key_needs_auth",true)
+                if(destinationChanged) putBoolean("startup_manually_disconnected",true)
+            }.commit()
+        if(!ok || (id==null && !storeHostRegistry(next))) {
+            if(id==null) source.edit().clear().commit()
+            releaseKeyIfUnused(chosenKey)
+            hostManageNotice="Could not save this connection."
+            return false
+        }
+        if(keyChanged) {
+            synchronized(vaultMutation) {vaultFor(target).clear()}
+            releaseKeyIfUnused(previousKey)
+        }
+        profileRevision++
+        backToSshConnections()
+        hostManageNotice="SSH connection saved."
+        return true
+    }
+
+    internal fun savedHostAction(id:String)=savedHostPrimaryAction(
+        isSelected=id==selectedHostId,
+        connectionOpen=connectionIsOpen,
+        hasAgentsView=showAgentSwitcher || hasRosterConnection || canSwitchAgents,
+    )
+
+    internal fun openConnectedHost(id:String):Boolean {
+        // Recheck on tap. This path never starts SSH or changes the startup host.
+        when(savedHostAction(id)) {
+            SavedHostPrimaryAction.OPEN_AGENTS -> showConnectedAgents()
+            SavedHostPrimaryAction.OPEN_TERMINAL -> if(canResumeConnection) resumeConnection() else return false
+            SavedHostPrimaryAction.CONNECT -> return false
+        }
+        return true
+    }
+
+    internal fun connectSavedHost(id:String):Boolean {
+        if(!canManageHosts || savedHostAction(id)!=SavedHostPrimaryAction.CONNECT) return false
+        val next=hostRegistry.select(id) ?: return false
+        if(id!=selectedHostId) {
+            // Disconnect while all credential and trust state still resolves to the old host.
+            if(!storeHostRegistry(next,selectInMemory=false)) return false
+            resetForHostSwitch()
+            hostRegistry=next
+            loadHostForm()
+        }
+        connect(list=true,backend=savedRosterBackend())
+        return true
+    }
+
+    private fun savedRosterBackend()=if(hostPrefs.getString("startup_backend",null)==AgentBackend.CORE.name)
+        AgentBackend.CORE else AgentBackend.TUI
+
+    internal fun removeHost(id:String):Boolean {
+        if(!canManageHosts) return false
+        val next=hostRegistry.remove(id) ?: return false
+        val removingSelected=id==selectedHostId
+        val source=prefsFor(id)
+        val uri=source.getString("key_document_uri",null)?.let(Uri::parse)
+        if(!storeHostRegistry(next,selectInMemory=!removingSelected)) return false
+        if(removingSelected) {
+            resetForHostSwitch()
+            hostRegistry=next
+            loadHostForm()
+        }
+        val deleted=if(id==SshHostProfiles.LEGACY) {
+            source.edit().apply {source.all.keys.filter(SshHostProfiles::isLegacyHostKey).forEach {remove(it)}}.commit()
+        } else source.edit().clear().commit()
+        val secretRemoved=synchronized(vaultMutation) {vaultFor(id).clear()}
+        releaseKeyIfUnused(uri)
+        profileRevision++
+        hostManageNotice=if(deleted && secretRemoved) "Saved connection removed."
+            else "Connection removed from the list, but Pocket could not confirm all local data was cleared."
+        return true
+    }
+
+    internal fun saveHostDetails():Boolean {
+        if(selectedHostId==null || busy || connectionIsOpen) return false
+        val endpoint=selectedEndpoint
+        if(endpoint==null || user.isBlank() || user.any(Char::isISOControl)) {
+            status="Enter a valid SSH host, port, and username."
+            return false
+        }
+        val namedSession=tuiSession.trim().ifBlank {null}
+        if(namedSession!=null && TuiAgents.parseSession(namedSession)!=namedSession) {
+            status="Enter a valid Herdr TUI session name or leave it blank."
+            return false
+        }
+        val sameStartup=hostPrefs.getString("startup_host",null)==endpoint.host &&
+            hostPrefs.getInt("startup_port",0)==endpoint.port &&
+            hostPrefs.getString("startup_user",null)==user.trim() &&
+            hostPrefs.getString("startup_tui_session",null)==namedSession
+        val ok=hostPrefs.edit().putString("host",endpoint.host).putString("port",endpoint.port.toString())
+            .putString("user",user.trim()).putString("connection_label",connectionLabel)
+            .putString("command",command).putString("tui_session",namedSession).apply {
+                if(!sameStartup) putBoolean("startup_manually_disconnected",true)
+            }.commit()
+        if(ok) profileRevision++
+        status=if(ok) "SSH connection saved." else "Could not save this connection."
+        return ok
+    }
+
+    internal fun beginKeyPicker():Boolean {
+        if(keyPickerOwner!=null) return false
+        val route=sshNavigation
+        if(route is SshNavigation.Edit) {
+            keyPickerOwner=KeyPickerOwner.Editor(route)
+        } else {
+            if(busy || connectionIsOpen) return false
+            keyPickerOwner=KeyPickerOwner.Active(selectedHostId ?: return false,generation)
+            noteManualConnectionAction()
+        }
+        return true
+    }
+
+    internal fun keyPicked(uri:Uri?) {
+        val owner=keyPickerOwner
+        keyPickerOwner=null
+        if(uri?.scheme!="content") return
+        when(owner) {
+            is KeyPickerOwner.Active -> if(owner.id==selectedHostId && owner.generation==generation) selectKey(uri)
+            is KeyPickerOwner.Editor -> if(sshNavigation===owner.route) editorKey=uri
+            null -> Unit
+        }
+    }
+
+    internal fun editorHasKey(id:String?) = editorKey!=null || id?.let {hostId ->
+        prefsFor(hostId).getString("key_document_uri",null)?.let(Uri::parse)
+            ?.let {runCatching {hasReadGrant(it)}.getOrDefault(false)}
+    }==true
     private fun hasReadGrant(uri:Uri):Boolean = resolver.persistedUriPermissions.any { it.uri==uri && it.isReadPermission }
-    private val initialKey=prefs.getString("key_document_uri",null)?.let(Uri::parse)?.takeIf { it.scheme=="content" }
+    private val initialKey=hostPrefs.getString("key_document_uri",null)?.let(Uri::parse)?.takeIf { it.scheme=="content" }
     private val restoredKey=initialKey?.takeIf { runCatching {hasReadGrant(it)}.getOrDefault(false) }
     private val keyGrantRevoked=initialKey!=null && restoredKey==null
-    private fun releaseKey(uri:Uri?) {
-        if(uri!=null) runCatching {resolver.releasePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION)}
+    private fun releaseKeyIfUnused(uri:Uri?) {
+        if(uri!=null && hostRegistry.ids.none {prefsFor(it).getString("key_document_uri",null)==uri.toString()}) runCatching {resolver.releasePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION)}
     }
     init {
         if(keyGrantRevoked) {
-            prefs.edit().remove("key_document_uri").apply()
+            hostPrefs.edit().remove("key_document_uri").apply()
             vault.clear()
         }
     }
-    var agentName by mutableStateOf(prefs.getString("agent", "My agent")!!)
-    private var hostState by mutableStateOf(prefs.getString("host", "")!!)
-    private var portState by mutableStateOf(prefs.getString("port", "22")!!)
+    var agentName by mutableStateOf(hostPrefs.getString("agent", "My agent")!!)
+    private var hostState by mutableStateOf(hostPrefs.getString("host", "")!!)
+    private var portState by mutableStateOf(hostPrefs.getString("port", "22")!!)
     var host: String
         get() = hostState
         set(value) { if (value != hostState) { hostState=value; noteManualConnectionAction(); invalidateOffer(); saveTypedPassphrase=false; passphrase=""; if(listedConfig!=null) cancelPicker() } }
@@ -150,30 +442,30 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         get() = portState
         set(value) { if (value != portState) { portState=value; noteManualConnectionAction(); invalidateOffer(); saveTypedPassphrase=false; passphrase=""; if(listedConfig!=null) cancelPicker() } }
     private val hostTrust = HostTrust(
-        read={ endpoint -> prefs.getString(endpoint.preferenceKey,null) },
-        write={ endpoint,fingerprint -> prefs.edit().putString(endpoint.preferenceKey,fingerprint).commit() },
+        read={ endpoint -> hostPrefs.getString(endpoint.preferenceKey,null) },
+        write={ endpoint,fingerprint -> hostPrefs.edit().putString(endpoint.preferenceKey,fingerprint).commit() },
     )
     private val selectedEndpoint get()=HostEndpoint.parse(host,port)
     private var pinRevision by mutableIntStateOf(0)
     val storedPin: String?
         get() = pinRevision.let { selectedEndpoint?.let(hostTrust::pin) }
     init {
-        val legacyPin=prefs.getString("pin",null)
+        val legacyPin=hostPrefs.getString("pin",null)
         if(legacyPin!=null) {
             val endpoint=selectedEndpoint
             // One atomic edit; never leave an unscoped pin available for a future endpoint edit.
-            val edit=prefs.edit().remove("pin")
+            val edit=hostPrefs.edit().remove("pin")
             if(endpoint!=null) hostTrust.legacyPinToMigrate(endpoint,legacyPin)?.let {
                 edit.putString(endpoint.preferenceKey,it)
             }
             edit.commit()
         }
     }
-    private var userState by mutableStateOf(prefs.getString("user", "")!!)
+    private var userState by mutableStateOf(hostPrefs.getString("user", "")!!)
     var user: String
         get() = userState
         set(value) { if(value!=userState) {userState=value;noteManualConnectionAction();invalidateOffer();saveTypedPassphrase=false;passphrase="";if(listedConfig!=null) cancelPicker()} }
-    var command by mutableStateOf(prefs.getString("command", "herdr")!!)
+    var command by mutableStateOf(hostPrefs.getString("command", "herdr")!!)
     var keyUri by mutableStateOf<Uri?>(restoredKey)
         private set
     var keyRemembered by mutableStateOf(restoredKey!=null)
@@ -194,15 +486,17 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         val saving=pendingSave ?: return
         pendingSave=null
         val epoch=credentialEpoch
+        val owner=selectedHostId
+        val targetVault=vault
         saveTypedPassphrase=false
         viewModelScope.launch(start=kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
             try {
                 val saved=withContext(Dispatchers.IO) {
                     synchronized(vaultMutation) {
-                        epoch==credentialEpoch && vault.save(saving.scope,saving.bytes)
+                        epoch==credentialEpoch && targetVault.save(saving.scope,saving.bytes)
                     }
                 }
-                if(epoch==credentialEpoch) {
+                if(epoch==credentialEpoch && owner==selectedHostId) {
                     hasSavedPassphrase=vault.hasSaved()
                     credentialNotice=if(saved) "Passphrase saved on this device." else "The passphrase was not saved. You can still use this connection."
                 }
@@ -219,7 +513,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         credentialNotice=if(removed) "Saved passphrase forgotten." else "Could not fully clear the saved passphrase. Try again."
         return removed
     }
-    private var tuiSessionState by mutableStateOf(prefs.getString("tui_session","").orEmpty())
+    private var tuiSessionState by mutableStateOf(hostPrefs.getString("tui_session","").orEmpty())
     var tuiSession:String
         get()=tuiSessionState
         set(value) {
@@ -287,7 +581,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         clearRetainedOutput()
     }
 
-    internal fun openRecoverySettings() {if(terminalRecovery!=null) terminalVisible=false}
+    internal fun leaveTerminalRecovery() {if(terminalRecovery!=null) backToSshConnections()}
 
     fun reconnect() {
         if(!canReconnect) return
@@ -310,15 +604,15 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun tryStartupReconnect() {
-        if(prefs.getBoolean("startup_manually_disconnected",false)) return
+        if(selectedHostId==null || hostPrefs.getBoolean("startup_manually_disconnected",false)) return
         val profile=StartupReconnectProfile(
-            prefs.getString("startup_host",null) ?: host,
-            prefs.getInt("startup_port",port.trim().toIntOrNull() ?: 0),
-            prefs.getString("startup_user",null) ?: user,
+            hostPrefs.getString("startup_host",null) ?: host,
+            hostPrefs.getInt("startup_port",port.trim().toIntOrNull() ?: 0),
+            hostPrefs.getString("startup_user",null) ?: user,
         )
         val endpoint=HostEndpoint.parse(profile.host,profile.port.toString())
         val pin=endpoint?.let(hostTrust::pin)
-        val unverifiedReplacement=prefs.getBoolean("startup_key_needs_auth",false)
+        val unverifiedReplacement=hostPrefs.getBoolean("startup_key_needs_auth",false)
         val granted=keyRemembered && keyUri?.let {runCatching {hasReadGrant(it)}.getOrDefault(false)}==true
         val allowed=startupGate.claim(profile,granted && !unverifiedReplacement,pin)
         if(busy || terminalVisible) return
@@ -346,15 +640,15 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
             }
         }
         val backend=AgentBackend.entries.firstOrNull {
-            it.name==prefs.getString("startup_backend",null)
+            it.name==hostPrefs.getString("startup_backend",null)
         } ?: AgentBackend.TUI
-        if(backend==AgentBackend.TUI) tuiSessionState=prefs.getString("startup_tui_session",tuiSession).orEmpty()
+        if(backend==AgentBackend.TUI) tuiSessionState=hostPrefs.getString("startup_tui_session",tuiSession).orEmpty()
         connect(list=true,automatic=true,backend=backend)
     }
 
     private fun saveStartupProfile(config:SshConfig,backend:AgentBackend,tuiSession:String?) {
         if(!keyRemembered) return
-        prefs.edit().putString("startup_host",config.host)
+        hostPrefs.edit().putString("startup_host",config.host)
             .putInt("startup_port",config.port)
             .putString("startup_user",config.user)
             .putString("startup_backend",backend.name)
@@ -365,7 +659,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun saveRecentSession(target:ResumeTarget, addressKey:String, address:String) {
-        prefs.edit().putString(addressKey,address).apply()
+        hostPrefs.edit().putString(addressKey,address).apply()
         saveStartupProfile(target.config,target.backend,target.tuiSession)
     }
     private var requestedAgent:String?=null
@@ -515,7 +809,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         speechTerminalIdentity()?.let {ssh.sendToTerminal(it,byteArrayOf(byte))}
     }
     fun speechTerminalIdentity():Any? =
-        displayedPty?.takeIf {!retainedTerminal && !demo && busy && terminalVisible && !showAgentSwitcher &&
+        displayedPty?.takeIf {sshNavigation==SshNavigation.Session && !retainedTerminal && !demo && busy && terminalVisible && !showAgentSwitcher &&
             status=="Connected · SSH PTY" && ssh.terminalIdentity()===it}
     internal val liveVoice by lazy {
         PocketLiveVoice(getApplication<Application>(),prefs,viewModelScope,ssh) {
@@ -549,7 +843,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
 
     internal data class PhysicalWheelRoute(val identity:Any,val modeRevision:Long,val remote:Boolean)
     internal fun physicalWheelRoute():PhysicalWheelRoute? {
-        if(demo && terminalVisible && !retainedTerminal) return PhysicalWheelRoute(emulator,0,false)
+        if(sshNavigation==SshNavigation.Session && demo && terminalVisible && !retainedTerminal) return PhysicalWheelRoute(emulator,0,false)
         return speechTerminalIdentity()?.let {PhysicalWheelRoute(it,terminalMouse.touchModeRevision,terminalMouse.wheelEnabled)}
     }
 
@@ -584,8 +878,8 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         fun clear() {key.fill(0);passphrase?.fill(0)}
     }
     private val agentPins=AgentPins(
-        read={ key -> prefs.getStringSet(key,emptySet()).orEmpty() },
-        write={ key, pins -> prefs.edit().putStringSet(key,pins).apply() },
+        read={ key -> hostPrefs.getStringSet(key,emptySet()).orEmpty() },
+        write={ key, pins -> hostPrefs.edit().putStringSet(key,pins).apply() },
     )
     private var agentPinRevision by mutableIntStateOf(0)
     private fun currentPinScope():AgentPinScope? {
@@ -716,6 +1010,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                 return
             }
             dismissAgentMenu()
+            resumeConnection()
             terminalVisible=true
             if(!showAgentSwitcher) {
                 openAgentSwitcher()
@@ -832,6 +1127,52 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
             displayedPty===route.pty && speechTerminalIdentity()===route.pty &&
             activeCoreAddress==route.address && resume===route.target && route.target.address==route.address
 
+    private var codexProgressOperation:Pair<Long,CompletableDeferred<SshSession.Event.OperationList>>?=null
+    internal val codexProgressAnchor:Any? get() {
+        val route=agentSettingsRoute ?: return null
+        val agent=activeAgentDetails ?: return null
+        return route.takeIf {currentAgentSettings(it) && it.target.backend==AgentBackend.TUI &&
+            agent.address==it.address && agent.agent.equals("codex",true) &&
+            agent.tuiLocation?.terminalId==it.address}
+    }
+
+    internal suspend fun readCodexProgress(anchor:Any):CodexProgress.Snapshot {
+        val unavailable=CodexProgress.Snapshot(CodexProgress.Availability.UNAVAILABLE)
+        val route=anchor as? AgentSettingsRoute ?: return unavailable
+        if(codexProgressAnchor!==route) return unavailable
+        val location=activeAgentDetails?.tuiLocation ?: return unavailable
+        suspend fun query(command:String,input:SshSession.StdioExchange?=null):LiveAgentHerdr.Reply? {
+            if(codexProgressAnchor!==route || codexProgressOperation!=null) return null
+            val id=(if(input==null) ssh.listOnTransport(command) else ssh.exchangeOnTransport(command,input)) ?: return null
+            val result=CompletableDeferred<SshSession.Event.OperationList>()
+            codexProgressOperation=id to result
+            try {
+                val event=withTimeoutOrNull(8_000) {result.await()} ?: return null
+                if(codexProgressAnchor!==route || activeAgentDetails?.tuiLocation!=location) return null
+                return LiveAgentHerdr.Reply(event.stdout.toString(Charsets.UTF_8),event.exitStatus==0)
+            } finally {
+                if(codexProgressOperation?.first==id) codexProgressOperation=null
+                ssh.cancelOperation(id)
+            }
+        }
+        val verify=LiveAgentHerdr.get(location,route.target.tuiSession)
+        fun instance(reply:LiveAgentHerdr.Reply?)=reply?.let {LiveAgentHerdr.status(it,location)}?.instance
+        val before=instance(query(verify)) ?: return unavailable
+        val thread=LiveCodexHistory.threadId(before)
+            ?: return CodexProgress.Snapshot(CodexProgress.Availability.NO_SESSION)
+        val exchange=SshSession.StdioExchange(LiveCodexHistory.request(thread),LiveCodexHistory::responseSeen)
+        val response=query(LiveCodexHistory.command,exchange)?.takeIf {it.ok} ?: return unavailable
+        if(instance(query(verify))!=before) return unavailable
+        return LiveCodexHistory.parse(response.stdout)?.let(CodexProgress::from) ?: unavailable
+    }
+
+    private fun acceptCodexProgress(event:SshSession.Event.OperationList):Boolean {
+        val (id,result)=codexProgressOperation ?: return false
+        if(event.id!=id) return false
+        result.complete(event)
+        return true
+    }
+
     internal val canRenameActiveAgent:Boolean get() {
         val route=agentSettingsRoute ?: return false
         val details=activeAgentDetails ?: return false
@@ -911,7 +1252,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                 if(details!=null) {
                     agentName=details.name
                     if(work.renamed!=null) {
-                        prefs.edit().putString("agent",details.name).apply()
+                        hostPrefs.edit().putString("agent",details.name).apply()
                         agentSettingsNotice="${work.renamed.displayName} renamed."
                     }
                 } else agentSettingsNotice=if(work.renamed!=null)
@@ -1831,32 +2172,11 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         clearAgentSwitcher()
     }
 
-    fun connectionFromAgents() {
-        if(!showAgentSwitcher || switchBusy) return
-        if(showSessionPicker) showAgentSwitcher=false else clearAgentSwitcher()
-        terminalVisible=false
-    }
-
-    internal val connectionBackDestination get() =
-        if(showSessionPicker && !showAgentSwitcher && !busy && listedConfig!=null) ConnectionBackDestination.AGENTS
-        else if(retainedTerminal && !terminalVisible && !showSessionPicker) ConnectionBackDestination.TERMINAL
-        else connectionBackDestination(
-        connected = busy && status=="Connected · SSH PTY",
-        terminalVisible = terminalVisible,
-        agentsVisible = showAgentSwitcher,
-        displayedPty = displayedPty,
-        livePty = ssh.terminalIdentity(),
-        activeCoreAddress = activeCoreAddress,
-    )
-
-    internal fun returnFromConnection() {
-        val destination=connectionBackDestination ?: return
-        if(showSessionPicker && destination==ConnectionBackDestination.AGENTS) {
-            showAgentSwitcher=true
-            return
+    internal fun backFromTerminal():Boolean {
+        return when(terminalBackDestination(canSwitchAgents)) {
+            TerminalBackDestination.AGENTS -> {showConnectedAgents(); true}
+            TerminalBackDestination.CONNECTIONS -> {backToSshConnections(); false}
         }
-        terminalVisible=true
-        if(destination==ConnectionBackDestination.AGENTS) openAgentSwitcher()
     }
 
     private fun clearAgentSwitcher() {
@@ -1910,7 +2230,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         rememberCandidate=null
         agentName=selected.name
         val endpoint=HostEndpoint.parse(target.config.host,target.config.port.toString())
-        prefs.edit().putString("agent",selected.name).apply()
+        hostPrefs.edit().putString("agent",selected.name).apply()
         if(endpoint!=null) saveRecentSession(target,target.backend.rememberedKey(endpoint,target.config.user,target.tuiSession),selected.address)
         terminalMouse.reset()
         replaceEmulator(displayedPty)
@@ -2041,7 +2361,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                         listErrors.write(event.bytes,0,minOf(event.bytes.size,8192-listErrors.size()))
                     if(!listing) renderConnectionOutput(event.bytes)
                 }
-                is SshSession.Event.OperationList -> if(liveVoice.accept(event)) Unit else if(coldRosterOperation==event.id) {
+                is SshSession.Event.OperationList -> if(liveVoice.accept(event) || acceptCodexProgress(event)) Unit else if(coldRosterOperation==event.id) {
                     finishColdRoster(event)
                 } else if(agentSettingsRequest==event.id) {
                     acceptAgentSettings(event)
@@ -2217,7 +2537,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         keepRetainedTerminal:Boolean=false,keepColdRoster:Boolean=false,
     ) {
         if(!automatic) noteManualConnectionAction()
-        if(busy) return
+        if(busy || selectedHostId==null) return
         val namedSession=tuiSessionName.takeIf {backend==AgentBackend.TUI}
         if(namedSession!=null && TuiAgents.parseSession(namedSession)!=namedSession) {
             finishStartup()
@@ -2243,12 +2563,13 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         if(!probe && keyUri==null) {status="Select a private key file.";return}
         val cfg=SshConfig(endpoint.host,endpoint.port,user.trim().ifBlank{"probe"},if(checking)null else expected)
         if(attach!=null && (listedConfig!=cfg || listedBackend!=backend || listedTuiSession!=namedSession || attach !in sessions || attach.state!="live")) {cancelPicker();status="Connection details changed. Choose sessions again.";return}
+        if(!probe) resumeConnection()
         reconnectOffered=false
         reconnectTarget=if(checking) null else reconnectProfile()?.let { profile ->
             val mode=when {
                 attach!=null -> ReconnectMode.AgentSession(true,attach.address,backend,namedSession)
                 list -> ReconnectMode.AgentSession(autoSelect,preferredAgent ?: if(autoSelect)
-                    prefs.getString(backend.rememberedKey(endpoint,cfg.user,namedSession),null) else null,backend,namedSession)
+                    hostPrefs.getString(backend.rememberedKey(endpoint,cfg.user,namedSession),null) else null,backend,namedSession)
                 else -> ReconnectMode.Custom(command)
             }
             ReconnectTarget(profile,mode)
@@ -2279,6 +2600,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
             else -> "Connecting…"
         }
         val request=++generation
+        val targetVault=vault
         if(checking) probeContext=Probe(endpoint,request,probe,if(probe || attach!=null)null else Request(list,autoSelect,backend,namedSession))
         val uri=keyUri
         val secret=if(checking) byteArrayOf() else passphrase.toByteArray(Charsets.UTF_8)
@@ -2318,7 +2640,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                 ) else null
                 if(mayReadStored && scope!=null && vault.has(scope)) {
                     // A missing/changed local pin cannot reach this code. SSH still verifies the remote key before auth.
-                    unlocked=withContext(Dispatchers.IO) {vault.read(scope)}
+                    unlocked=withContext(Dispatchers.IO) {targetVault.read(scope)}
                     if(request!=generation) return@launch
                     hasSavedPassphrase=vault.hasSaved()
                     if(unlocked==null) {
@@ -2334,10 +2656,11 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
                 val credential=unlocked ?: secret.takeIf { it.isNotEmpty() }
-                prefs.edit().putString("agent",agentName).putString("host",host).putString("port",port)
-                    .putString("user",user).putString("command",command).apply {
+                hostPrefs.edit().putString("agent",agentName).putString("host",host).putString("port",port)
+                    .putString("user",user).putString("command",command).putString("connection_label",connectionLabel).apply {
                         if(backend==AgentBackend.TUI && !checking) putString("tui_session",namedSession)
                     }.apply()
+                profileRevision++
                 if(wantsSave && scope!=null) pendingSave=PendingSave(scope,secret.copyOf())
                 if(attach!=null) resume=ResumeTarget(cfg,key.copyOf(),credential?.copyOf(),cmd,attach.address,backend,namedSession)
                 checkNotNull(ssh.connect(cfg,key,credential,cmd,cols,rows,pty=!list,transportOnly=holdRosterTransport,keepTransportOnPtyClose=attach!=null && !checking))
@@ -2376,14 +2699,14 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
             resolver.takePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION)
             hasReadGrant(uri)
         }.getOrDefault(false)
-        val persisted=prefs.edit().putBoolean("startup_key_needs_auth",true).apply {
+        val persisted=hostPrefs.edit().putBoolean("startup_key_needs_auth",true).apply {
             if(keyRemembered) putString("key_document_uri",uri.toString()) else remove("key_document_uri")
         }.commit()
         if(!persisted) {
             keyRemembered=false
-            releaseKey(uri)
+            releaseKeyIfUnused(uri)
         }
-        if(previous!=uri) releaseKey(previous)
+        if(previous!=uri) releaseKeyIfUnused(previous)
         credentialNotice=if(keyRemembered) "Key file remembered on this device." else "Android did not let the app remember this key. It is available for this session only."
         if(!cleared) credentialNotice+=" Old saved passphrase could not be fully cleared."
         status="Key selected."
@@ -2398,18 +2721,18 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         reconnectOffered=false
         reconnectTarget=null
         keyUri=null;keyRemembered=false
-        val removed=prefs.edit().remove("key_document_uri").commit()
-        releaseKey(previous)
+        val removed=hostPrefs.edit().remove("key_document_uri").commit()
+        releaseKeyIfUnused(previous)
         cancelPicker()
         val cleared=forgetSavedPassphrase()
         credentialNotice=if(removed && cleared) "Key access and saved passphrase forgotten." else "Could not confirm credentials were fully forgotten. Try again."
     }
 
     fun disconnect(manual:Boolean=false) {
-        if(manual) prefs.edit().putBoolean("startup_manually_disconnected",true).apply()
+        if(manual) hostPrefs.edit().putBoolean("startup_manually_disconnected",true).apply()
         liveVoice.stop()
         if(AgentWatchService.state.value is AgentWatchServiceState.Active) AgentWatchService.stop(getApplication<Application>())
-        if(retainedTerminal) terminalVisible=false
+        if(retainedTerminal || manual) terminalVisible=false
         retainedTerminal=false
         clearRetainedOutput()
         noteManualConnectionAction();finishStartup();reconnectOffered=false;reconnectTarget=null;invalidateOffer()
@@ -2417,7 +2740,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         busy=false;listing=false;cancelPicker();status="Disconnected"
     }
     fun showDemo() {
-        disconnect();demo=true;terminalVisible=true;status="LOCAL DEMO · no SSH connection"
+        disconnect();resumeConnection();demo=true;terminalVisible=true;status="LOCAL DEMO · no SSH connection"
         emulator.writeInput("\u001b[2J\u001b[HHerdr Pocket · local renderer demo\r\n\r\n".toByteArray())
         val bitmap=Bitmap.createBitmap(240,100,Bitmap.Config.ARGB_8888)
         val canvas=Canvas(bitmap);canvas.drawColor(android.graphics.Color.rgb(30,55,65))
@@ -2489,11 +2812,10 @@ class MainActivity : ComponentActivity() {
         model.onFileUploadPicked(uri)
     }
     private val keyPicker=registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if(uri!=null) model.selectKey(uri)
+        model.keyPicked(uri)
     }
     override fun onCreate(savedInstanceState:Bundle?) {
         super.onCreate(savedInstanceState)
-        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         model=ViewModelProvider(this)[PocketModel::class.java]
         handleAgentAlert(intent)
         model.tryStartupReconnect()
@@ -2508,7 +2830,7 @@ class MainActivity : ComponentActivity() {
                         notificationsAllowed=watchOsAllowed,
                         setAgentNotifications=::setAgentNotifications,
                         openAndroidNotificationSettings=::openAndroidNotificationSettings,
-                        chooseKey={model.noteManualConnectionAction();keyPicker.launch(arrayOf("*/*"))},
+                        chooseKey={if(model.beginKeyPicker()) runCatching {keyPicker.launch(arrayOf("*/*"))}.onFailure {model.keyPicked(null)}},
                         uploadFile={
                             model.startProtectedFileUpload(this) {uploadPicker.launch(arrayOf("*/*"))}
                         },
@@ -2568,13 +2890,28 @@ class MainActivity : ComponentActivity() {
         }))},confirmButton={TextButton(onClick=m::clearFilesUploadNotice){Text("OK")}})
  }
 
+ when(val route=m.sshNavigation) {
+    SshNavigation.Connections -> { SavedConnectionsScreen(m,onOpenAgents={rosterView=AgentRosterView.AGENTS}); return }
+    SshNavigation.Settings -> {
+        ConnectionSettingsScreen(m,chooseKey)
+        return
+    }
+    SshNavigation.AppSettings -> {
+        PocketAppSettingsScreen(m,notificationsAllowed,setAgentNotifications,openAndroidNotificationSettings)
+        return
+    }
+    is SshNavigation.Edit -> { key(route) { SshHostEditorScreen(m,route.id,chooseKey) }; return }
+    SshNavigation.Session -> Unit
+ }
  m.terminalRecovery?.let { recovery ->
     FrozenTerminalScreen(m,recovery)
     return
  }
  val opening=m.terminalOpening
  if(opening?.agentChrome==true || opening==null && !m.showAgentSwitcher && m.terminalVisible && m.canSwitchAgents) {
-    CoreTerminal(m,saveFile,uploadFile,opening)
+    CoreTerminal(m,saveFile,uploadFile,opening,onBack={
+        if(m.backFromTerminal()) rosterView=AgentRosterView.AGENTS
+    })
     return
  }
  if(opening==null && m.showAgentSwitcher) {
@@ -2583,115 +2920,163 @@ class MainActivity : ComponentActivity() {
  }
 
  if(m.terminalVisible || opening!=null) {
-    BackHandler(enabled=opening!=null,onBack=m::cancelTerminalOpening)
+    val back=if(opening!=null) m::cancelTerminalOpening else ({ m.backFromTerminal(); Unit })
+    BackHandler(onBack=back)
     Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal=12.dp,vertical=4.dp),
             verticalAlignment=Alignment.CenterVertically,
         ) {
             Text((opening?.title ?: m.agentName).ifBlank{"Terminal"},fontSize=22.sp,modifier=Modifier.weight(1f))
-            TextButton(onClick={if(opening!=null) m.cancelTerminalOpening() else m.terminalVisible=false}) {
-                Text(stringResource(if(opening!=null) android.R.string.cancel else R.string.connection_settings))
-            }
+            RoundBackArrow(if(opening!=null) stringResource(android.R.string.cancel) else "Back to SSH connections",back,48.dp)
         }
         TerminalPanel(m,Modifier.weight(1f).fillMaxWidth(),opening=opening!=null)
     }
     return
  }
- ConnectionSettingsScreen(m,chooseKey,notificationsAllowed,setAgentNotifications,openAndroidNotificationSettings)
+ SavedConnectionsScreen(m,onOpenAgents={rosterView=AgentRosterView.AGENTS})
 }
 
 @Composable
 private fun ConnectionSettingsScreen(
     m:PocketModel,
     chooseKey:()->Unit,
-    notificationsAllowed:Boolean,
-    setAgentNotifications:(Boolean)->Unit,
-    openAndroidNotificationSettings:()->Unit,
 ) {
     val theme=MaterialTheme.colorScheme
-    val destination=m.connectionBackDestination
-    var advanced by rememberSaveable {mutableStateOf(false)}
-    BackHandler(enabled=destination!=null,onBack=m::returnFromConnection)
+    var advanced by rememberSaveable(m.selectedHostId) {mutableStateOf(false)}
+    val canEditHost=!m.busy && !m.connectionIsOpen
+    BackHandler(onBack=m::backToSshConnections)
     Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
         Box(
             Modifier.fillMaxWidth().heightIn(min=56.dp).padding(horizontal=12.dp,vertical=4.dp),
             contentAlignment=Alignment.Center,
         ) {
-            if(destination!=null) {
-                val label=stringResource(when(destination) {
-                    ConnectionBackDestination.AGENTS -> R.string.back_to_agents
-                    ConnectionBackDestination.TERMINAL -> R.string.back_to_terminal
-                })
-                RoundBackArrow(label,m::returnFromConnection,48.dp,Modifier.align(Alignment.CenterStart))
-            }
-            Text(stringResource(R.string.connection_settings),style=MaterialTheme.typography.titleLarge,
-                textAlign=androidx.compose.ui.text.style.TextAlign.Center,
+            RoundBackArrow("Back to SSH connections",m::backToSshConnections,48.dp,Modifier.align(Alignment.CenterStart))
+            Text(stringResource(R.string.connection_settings),
+                style=MaterialTheme.typography.titleLarge,textAlign=androidx.compose.ui.text.style.TextAlign.Center,
                 modifier=Modifier.padding(horizontal=52.dp).semantics {heading()})
         }
         Column(
             Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal=16.dp,vertical=8.dp),
             verticalArrangement=Arrangement.spacedBy(12.dp),
         ) {
+            val current=m.savedHosts.firstOrNull {it.id==m.selectedHostId}
+            if(current!=null) {
+                Text(current.name,style=MaterialTheme.typography.titleMedium)
+                Text(current.address,style=MaterialTheme.typography.bodyMedium)
+            }
             ConnectionSection(R.string.connection_status_section) {
                 Text(m.status,style=MaterialTheme.typography.bodyLarge,
                     modifier=Modifier.semantics {liveRegion=LiveRegionMode.Polite})
                 if(m.canReviewHostKey) OutlinedButton(onClick={m.connect(probe=true)}) {Text("Review changed host key")}
-                if(m.canReconnect) OutlinedButton(onClick=m::reconnect) {Text(stringResource(R.string.reconnect))}
+                if(m.canReconnect) OutlinedButton(onClick={m.reconnect(); if(m.busy) m.resumeConnection()}) {Text(stringResource(R.string.reconnect))}
                 if(m.busy || m.hasRosterConnection) OutlinedButton(onClick={m.disconnect(manual=true)}) {
                     Text(if(m.status=="Connected · SSH PTY" || m.hasRosterConnection) "Disconnect" else "Cancel connection")
                 }
             }
-            ConnectionSection(R.string.connection_host_section) {
-                Field("Host or IP address",m.host,{m.host=it},!m.busy)
-                Field("SSH username",m.user,{m.user=it},!m.busy)
-                OutlinedButton(onClick={m.connect(list=true,backend=AgentBackend.TUI)},enabled=!m.busy,
-                    modifier=Modifier.fillMaxWidth(),border=BorderStroke(2.dp,if(m.busy) PocketDisabledInk else PocketInk)) {Text("Connect to Herdr TUI",fontSize=18.sp)}
-                OutlinedButton(onClick={m.connect(list=true,backend=AgentBackend.CORE)},enabled=!m.busy,
-                    modifier=Modifier.fillMaxWidth()) {Text("Connect to Herdr Core")}
-            }
-            ConnectionSection(R.string.connection_keys_section) {
-                OutlinedButton(onClick=chooseKey,enabled=!m.busy){
-                    Text(if(m.keyUri==null) "Select private key file" else "Change private key file")
+            if(current!=null) {
+                ConnectionSection(R.string.connection_host_section) {
+                    Field("Connection name (optional)",m.connectionLabel,{m.connectionLabel=it},canEditHost)
+                    Field("Host or IP address",m.host,{m.host=it},canEditHost)
+                    Field("SSH username",m.user,{m.user=it},canEditHost)
+                    OutlinedTextField(value=m.port,onValueChange={m.port=it},label={Text("SSH port")},
+                        keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),singleLine=true,
+                        enabled=canEditHost,modifier=Modifier.fillMaxWidth())
+                    if(m.connectionIsOpen) Text("Disconnect to edit this connection.")
+                    else TextButton(onClick={m.saveHostDetails()},enabled=canEditHost) {Text("Save connection")}
                 }
-                if(m.keyUri!=null) {
-                    OutlinedTextField(value=m.passphrase,onValueChange={m.passphrase=it},
-                        label={Text("Key passphrase (optional)")},
-                        visualTransformation=PasswordVisualTransformation(),
-                        keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Password),
-                        singleLine=true,enabled=!m.busy,modifier=Modifier.fillMaxWidth())
-                    Row(
-                        Modifier.fillMaxWidth().heightIn(min=48.dp).toggleable(
-                            value=m.saveTypedPassphrase,enabled=!m.busy && m.keyRemembered,
-                            role=Role.Checkbox,onValueChange=m::toggleRememberPassphrase),
-                        verticalAlignment=Alignment.CenterVertically,
-                    ) {
-                        Checkbox(checked=m.saveTypedPassphrase,onCheckedChange=null,
-                            enabled=!m.busy && m.keyRemembered,modifier=Modifier.padding(end=12.dp))
-                        Text("Remember the passphrase I enter",style=MaterialTheme.typography.bodyLarge)
+                ConnectionSection(R.string.connection_keys_section) {
+                    OutlinedButton(onClick=chooseKey,enabled=canEditHost){
+                        Text(if(m.keyUri==null) "Select private key file" else "Change private key file")
                     }
-                    if(m.hasSavedPassphrase) {
-                        Text("A saved passphrase is used only with its original host, login, and key.",
+                    if(m.keyUri!=null) {
+                        OutlinedTextField(value=m.passphrase,onValueChange={m.passphrase=it},
+                            label={Text("Key passphrase (optional)")},
+                            visualTransformation=PasswordVisualTransformation(),
+                            keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Password),
+                            singleLine=true,enabled=canEditHost,modifier=Modifier.fillMaxWidth())
+                        Row(
+                            Modifier.fillMaxWidth().heightIn(min=48.dp).toggleable(
+                                value=m.saveTypedPassphrase,enabled=canEditHost && m.keyRemembered,
+                                role=Role.Checkbox,onValueChange=m::toggleRememberPassphrase),
+                            verticalAlignment=Alignment.CenterVertically,
+                        ) {
+                            Checkbox(checked=m.saveTypedPassphrase,onCheckedChange=null,
+                                enabled=canEditHost && m.keyRemembered,modifier=Modifier.padding(end=12.dp))
+                            Text("Remember the passphrase I enter",style=MaterialTheme.typography.bodyLarge)
+                        }
+                        if(m.hasSavedPassphrase) {
+                            Text("A saved passphrase is used only with its original host, login, and key.",
+                                style=MaterialTheme.typography.bodyMedium,color=theme.onSurfaceVariant)
+                            TextButton(onClick={m.forgetSavedPassphrase()},enabled=canEditHost) {Text("Forget saved passphrase")}
+                        }
+                        TextButton(onClick=m::forgetKey,enabled=canEditHost) {Text("Forget key")}
+                    }
+                    if(m.credentialNotice.isNotBlank()) Text(m.credentialNotice,style=MaterialTheme.typography.bodyLarge,
+                        modifier=Modifier.semantics {liveRegion=LiveRegionMode.Polite})
+                }
+                if(!m.connectionIsOpen) {
+                    OutlinedButton(onClick={m.connect(list=true,backend=AgentBackend.TUI)},enabled=canEditHost,
+                        modifier=Modifier.fillMaxWidth(),border=BorderStroke(2.dp,if(canEditHost) PocketInk else PocketDisabledInk)) {Text("Connect to Herdr TUI",fontSize=18.sp)}
+                    OutlinedButton(onClick={m.connect(list=true,backend=AgentBackend.CORE)},enabled=canEditHost,
+                        modifier=Modifier.fillMaxWidth()) {Text("Connect to Herdr Core")}
+                }
+                ConnectionSection(R.string.connection_verify_section) {
+                    m.storedPin?.let { pin ->
+                        Text(stringResource(R.string.connection_saved_host_pin,pin),style=MaterialTheme.typography.bodyLarge)
+                    } ?: Text(stringResource(R.string.connection_no_saved_host_pin),
+                        style=MaterialTheme.typography.bodyMedium,color=theme.onSurfaceVariant)
+                    m.observedPin?.let { pin ->
+                        Text(stringResource(R.string.connection_offered_host_pin,pin),style=MaterialTheme.typography.bodyLarge)
+                        Text(stringResource(R.string.connection_compare_host_pin),style=MaterialTheme.typography.bodyMedium,
+                            color=theme.onSurfaceVariant)
+                    }
+                    OutlinedButton(onClick={m.connect(probe=true)},enabled=canEditHost) {Text("Check host fingerprint")}
+                }
+            }
+            ConnectionSection(R.string.connection_advanced_section) {
+                TextButton(onClick={advanced=!advanced}) {
+                    Text(stringResource(if(advanced) R.string.connection_hide_advanced else R.string.connection_show_advanced))
+                }
+                if(advanced) {
+                    if(current!=null) {
+                        Field("Herdr TUI session (blank = default)",m.tuiSession,{m.tuiSession=it},canEditHost)
+                        Field("Agent / session name",m.agentName,{m.agentName=it},canEditHost)
+                        Field("Custom attach command",m.command,{m.command=it},canEditHost)
+                        OutlinedButton(onClick={m.connect()},enabled=canEditHost,modifier=Modifier.fillMaxWidth()) {
+                            Text("Run custom attach command")
+                        }
+                        Text("Choose an attach-only custom command. It runs on the SSH host.",
                             style=MaterialTheme.typography.bodyMedium,color=theme.onSurfaceVariant)
-                        TextButton(onClick={m.forgetSavedPassphrase()},enabled=!m.busy) {Text("Forget saved passphrase")}
                     }
-                    TextButton(onClick=m::forgetKey,enabled=!m.busy) {Text("Forget key")}
+                    CoreInstallHelp()
+
                 }
-                if(m.credentialNotice.isNotBlank()) Text(m.credentialNotice,style=MaterialTheme.typography.bodyLarge,
-                    modifier=Modifier.semantics {liveRegion=LiveRegionMode.Polite})
             }
-            ConnectionSection(R.string.connection_verify_section) {
-                m.storedPin?.let { pin ->
-                    Text(stringResource(R.string.connection_saved_host_pin,pin),style=MaterialTheme.typography.bodyLarge)
-                } ?: Text(stringResource(R.string.connection_no_saved_host_pin),
-                    style=MaterialTheme.typography.bodyMedium,color=theme.onSurfaceVariant)
-                m.observedPin?.let { pin ->
-                    Text(stringResource(R.string.connection_offered_host_pin,pin),style=MaterialTheme.typography.bodyLarge)
-                    Text(stringResource(R.string.connection_compare_host_pin),style=MaterialTheme.typography.bodyMedium,
-                        color=theme.onSurfaceVariant)
-                }
-                OutlinedButton(onClick={m.connect(probe=true)},enabled=!m.busy) {Text("Check host fingerprint")}
-            }
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+}
+
+@Composable
+private fun PocketAppSettingsScreen(
+    m:PocketModel,
+    notificationsAllowed:Boolean,
+    setAgentNotifications:(Boolean)->Unit,
+    openAndroidNotificationSettings:()->Unit,
+) {
+    val theme=MaterialTheme.colorScheme
+    BackHandler(onBack=m::backToSshConnections)
+    Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
+        Box(Modifier.fillMaxWidth().heightIn(min=56.dp).padding(horizontal=12.dp,vertical=4.dp),
+            contentAlignment=Alignment.Center) {
+            RoundBackArrow("Back to SSH connections",m::backToSshConnections,48.dp,Modifier.align(Alignment.CenterStart))
+            Text("App settings",style=MaterialTheme.typography.titleLarge,
+                modifier=Modifier.padding(horizontal=52.dp).semantics {heading()})
+        }
+        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
+            verticalArrangement=Arrangement.spacedBy(12.dp)) {
+            Text("These settings apply to all SSH connections.",style=MaterialTheme.typography.bodyMedium)
             ConnectionSection(R.string.connection_alerts_section) {
                 AgentWatchSettings(m.notificationsEnabled,notificationsAllowed,m.watchLeaseToken!=null,
                     setAgentNotifications,openAndroidNotificationSettings)
@@ -2713,29 +3098,125 @@ private fun ConnectionSettingsScreen(
             }
             ConnectionSection(R.string.live_voice_settings) { LiveVoiceServiceSettings(m.liveVoice) }
             ConnectionSection(R.string.connection_advanced_section) {
-                TextButton(onClick={advanced=!advanced}) {
-                    Text(stringResource(if(advanced) R.string.connection_hide_advanced else R.string.connection_show_advanced))
+                OutlinedButton(onClick=m::showDemo,enabled=!m.busy && !m.connectionIsOpen) {Text("Local Kitty image demo")}
+                Text("ConnectBot Termlib (Apache 2.0), libvterm (MIT), mwiede JSch (BSD). Licenses bundled.",
+                    style=MaterialTheme.typography.bodySmall,color=theme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SshHostEditorScreen(m:PocketModel,id:String?,chooseKey:()->Unit) {
+    val original=remember(id) {m.hostEditorFields(id)}
+    var name by rememberSaveable(id) {mutableStateOf(original.name)}
+    var host by rememberSaveable(id) {mutableStateOf(original.host)}
+    var port by rememberSaveable(id) {mutableStateOf(original.port)}
+    var user by rememberSaveable(id) {mutableStateOf(original.user)}
+    BackHandler(onBack=m::backToSshConnections)
+    Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
+        Box(Modifier.fillMaxWidth().heightIn(min=56.dp).padding(horizontal=12.dp,vertical=4.dp),
+            contentAlignment=Alignment.Center) {
+            RoundBackArrow("Back to SSH connections",m::backToSshConnections,48.dp,Modifier.align(Alignment.CenterStart))
+            Text(if(id==null) "Add SSH connection" else "Edit SSH connection",style=MaterialTheme.typography.titleLarge,
+                modifier=Modifier.padding(horizontal=52.dp).semantics {heading()})
+        }
+        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
+            verticalArrangement=Arrangement.spacedBy(12.dp)) {
+            Field("Connection name (optional)",name,{name=it.take(64)},true)
+            Field("Host or IP address",host,{host=it},true)
+            Field("SSH username",user,{user=it},true)
+            OutlinedTextField(value=port,onValueChange={port=it},label={Text("SSH port")},
+                keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),singleLine=true,
+                modifier=Modifier.fillMaxWidth())
+            OutlinedButton(onClick=chooseKey) {
+                Text(if(m.editorHasKey(id)) "Change private key file" else "Select private key file")
+            }
+            if(m.editorKey!=null) Text("Key selected.")
+            if(id==null) Text("Saving won’t switch hosts. If you skip the key, you can select one when you connect.")
+            if(m.hostManageNotice.isNotBlank()) Text(m.hostManageNotice,
+                modifier=Modifier.semantics {liveRegion=LiveRegionMode.Polite})
+            OutlinedButton(onClick={m.saveEditedHost(id,SshHostEditorFields(name,host,port,user))},
+                modifier=Modifier.fillMaxWidth()) {Text("Save connection")}
+        }
+    }
+}
+
+@Composable
+private fun SavedConnectionsScreen(m:PocketModel,onOpenAgents:()->Unit) {
+    var removeId by rememberSaveable {mutableStateOf<String?>(null)}
+    val hosts=m.savedHosts
+    val selected=m.selectedHostId
+    Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
+        Box(Modifier.fillMaxWidth().heightIn(min=56.dp).padding(horizontal=12.dp,vertical=4.dp),
+            contentAlignment=Alignment.Center) {
+            Text("SSH connections",style=MaterialTheme.typography.titleLarge,
+                modifier=Modifier.padding(horizontal=52.dp).semantics {heading()})
+        }
+        LazyColumn(Modifier.weight(1f).fillMaxWidth(),contentPadding=PaddingValues(16.dp),
+            verticalArrangement=Arrangement.spacedBy(12.dp)) {
+            item {
+                OutlinedButton(onClick={m.editHost(null)},modifier=Modifier.fillMaxWidth()) {Text("Add connection")}
+                OutlinedButton(onClick=m::openAppSettings,modifier=Modifier.fillMaxWidth()) {Text("App settings")}
+                if(hosts.isEmpty()) Text("No saved connections yet.")
+                if(selected!=null && !m.connectionIsOpen && m.status!="Disconnected") {
+                    Text(m.status,modifier=Modifier.semantics {liveRegion=LiveRegionMode.Polite})
                 }
-                if(advanced) {
-                    OutlinedTextField(value=m.port,onValueChange={m.port=it},label={Text("SSH port")},
-                        keyboardOptions=KeyboardOptions(keyboardType=KeyboardType.Number),singleLine=true,
-                        enabled=!m.busy,modifier=Modifier.fillMaxWidth())
-                    Field("Herdr TUI session (blank = default)",m.tuiSession,{m.tuiSession=it},!m.busy)
-                    Field("Agent / session name",m.agentName,{m.agentName=it},!m.busy)
-                    Field("Custom attach command",m.command,{m.command=it},!m.busy)
-                    OutlinedButton(onClick={m.connect()},enabled=!m.busy,modifier=Modifier.fillMaxWidth()) {
-                        Text("Run custom attach command")
+                if(m.connectionIsOpen && hosts.size>1) Text("Connecting to another host switches Pocket to that host.")
+                if(m.hostManageNotice.isNotBlank()) Text(m.hostManageNotice,
+                    modifier=Modifier.semantics {liveRegion=LiveRegionMode.Polite})
+            }
+            items(hosts,key={it.id}) {host ->
+                val action=m.savedHostAction(host.id)
+                val connected=action!=SavedHostPrimaryAction.CONNECT
+                val openLabel=if(action==SavedHostPrimaryAction.OPEN_AGENTS) "Open agents" else "Open terminal"
+                val open=Modifier.clickable(role=Role.Button,onClickLabel=openLabel) {
+                    if(m.openConnectedHost(host.id) && action==SavedHostPrimaryAction.OPEN_AGENTS) onOpenAgents()
+                }
+                Surface(Modifier.fillMaxWidth(),shape=PocketPanelShape,color=PocketBlack,
+                    border=BorderStroke(if(connected) 2.dp else 1.dp,if(connected) PocketInk else PocketOutline)) {
+                    Column {
+                        Column(Modifier.fillMaxWidth()
+                            .then(if(connected) Modifier.background(PocketInk.copy(alpha=.12f)).then(open) else Modifier)
+                            .heightIn(min=56.dp).padding(12.dp),verticalArrangement=Arrangement.spacedBy(4.dp)) {
+                            Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.Top) {
+                                Text(host.name,style=MaterialTheme.typography.titleMedium,modifier=Modifier.weight(1f))
+                                if(connected) {
+                                    Canvas(Modifier.padding(start=8.dp).size(20.dp)) {
+                                        val left=size.width*.32f
+                                        val right=size.width*.61f
+                                        val center=size.height*.5f
+                                        val offset=size.height*.23f
+                                        drawLine(PocketInk,Offset(left,center-offset),Offset(right,center),PocketGlyphStroke.toPx(),StrokeCap.Round)
+                                        drawLine(PocketInk,Offset(right,center),Offset(left,center+offset),PocketGlyphStroke.toPx(),StrokeCap.Round)
+                                    }
+                                }
+                            }
+                            Text(host.address,style=MaterialTheme.typography.bodyMedium)
+                            if(connected) Text("Connected",style=MaterialTheme.typography.labelLarge,color=PocketInk)
+                            else if(host.id==selected) Text(if(m.busy) "Connecting" else "Selected · Disconnected",
+                                style=MaterialTheme.typography.bodySmall)
+                        }
+                        if(!connected) OutlinedButton(onClick={m.connectSavedHost(host.id)},
+                            enabled=m.canManageHosts && host.configured,
+                            modifier=Modifier.fillMaxWidth().padding(horizontal=12.dp)) {Text("Connect")}
+                        Row(Modifier.fillMaxWidth().padding(horizontal=12.dp),horizontalArrangement=Arrangement.SpaceBetween) {
+                            TextButton(onClick={m.editHost(host.id)}) {
+                                Text(if(host.id==selected) "Settings" else "Edit")
+                            }
+                            TextButton(onClick={removeId=host.id},enabled=m.canManageHosts) {Text("Remove")}
+                        }
                     }
-                    Text("Choose an attach-only custom command. It runs on the SSH host.",
-                        style=MaterialTheme.typography.bodyMedium,color=theme.onSurfaceVariant)
-                    CoreInstallHelp()
-                    OutlinedButton(onClick=m::showDemo,enabled=!m.busy) {Text("Local Kitty image demo")}
-                    Text("ConnectBot Termlib (Apache 2.0), libvterm (MIT), mwiede JSch (BSD). Licenses bundled.",
-                        style=MaterialTheme.typography.bodySmall,color=theme.onSurfaceVariant)
                 }
             }
-            Spacer(Modifier.height(8.dp))
         }
+    }
+    hosts.firstOrNull {it.id==removeId}?.let {host ->
+        PocketDialog(onDismissRequest={removeId=null},title={Text("Remove this connection?")},
+            text={Text("${host.name}\n${host.address}\n\nThis removes its saved connection details, fingerprint, and remembered passphrase from Pocket. It does not change the remote host or delete your SSH key file."+
+                if(host.id==selected && m.connectionIsOpen) " Pocket will disconnect from this host." else "")},
+            confirmButton={TextButton(onClick={if(m.removeHost(host.id)) removeId=null}) {Text("Remove connection")}},
+            dismissButton={TextButton(onClick={removeId=null}) {Text("Cancel")}})
     }
 }
 
@@ -3055,7 +3536,7 @@ private data class PendingTerminalLink(val target:TerminalWebLink,val route:Remo
         focus.clearFocus(force=true)
         keyboard?.hide()
     }
-    BackHandler(onBack=m::openRecoverySettings)
+    BackHandler(onBack=m::leaveTerminalRecovery)
     Box(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
         TerminalPanel(m,Modifier.fillMaxSize(),suspended=true)
         // One physical scrim catches gestures on the frozen terminal; the
@@ -3082,18 +3563,18 @@ private data class PendingTerminalLink(val target:TerminalWebLink,val route:Remo
                 Text(m.status,fontSize=17.sp,textAlign=androidx.compose.ui.text.style.TextAlign.Center,
                     modifier=Modifier.semantics {liveRegion=LiveRegionMode.Polite})
             }
-            OutlinedButton(onClick=m::openRecoverySettings) {
-                Text(stringResource(R.string.connection_settings),fontSize=17.sp)
+            OutlinedButton(onClick=m::leaveTerminalRecovery) {
+                Text("SSH connections",fontSize=17.sp)
             }
         }
     }
 }
 
-@Composable private fun CoreTerminal(m:PocketModel,saveFile:()->Unit,uploadFile:()->Unit,opening:TerminalOpeningUi?=null) {
+@Composable private fun CoreTerminal(m:PocketModel,saveFile:()->Unit,uploadFile:()->Unit,opening:TerminalOpeningUi?,onBack:()->Unit) {
     val headerSize=maxOf(48.dp, with(LocalDensity.current) {24.sp.toDp()} + 16.dp)
     val files = m.filesUi
     val menuOpen = m.agentMenuOpen
-    val back=if(opening!=null) m::cancelTerminalOpening else m::openAgentSwitcher
+    val back=if(opening!=null) m::cancelTerminalOpening else onBack
     // This is only a view preference for the current terminal, not a navigation destination.
     var headerHidden by remember(m.emulator,opening) {mutableStateOf(false)}
     val hideHeader=stringResource(R.string.terminal_header_hide)
@@ -3122,7 +3603,7 @@ private data class PendingTerminalLink(val target:TerminalWebLink,val route:Remo
                 verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,
                 horizontalArrangement=Arrangement.spacedBy(8.dp),
             ) {
-                RoundBackArrow(if(opening!=null) stringResource(android.R.string.cancel) else "Open agents",back,headerSize)
+                RoundBackArrow(if(opening!=null) stringResource(android.R.string.cancel) else "Back to agents",back,headerSize)
                 Box(Modifier.weight(1f)) {
                     Surface(
                         shape=CircleShape,color=PocketBlack,contentColor=PocketInk,
@@ -3148,7 +3629,8 @@ private data class PendingTerminalLink(val target:TerminalWebLink,val route:Remo
             menuOpen -> {
                 AgentMenuScreen(m.activeAgentDetails?.name ?: m.agentName,m.activeAgentDetails,m.rosterAvatarScope,
                     m.canRenameActiveAgent,m.agentSettingsLoading,m.agentSettingsNotice,
-                    m::askToRenameActiveAgent,m::refreshAgentSettings,m::openAgentFiles,m::dismissAgentSettings)
+                    m::askToRenameActiveAgent,m::refreshAgentSettings,m::openAgentFiles,m::dismissAgentSettings,
+                    progressAnchor=m.codexProgressAnchor,readProgress=m::readCodexProgress)
                 m.renamingAgent?.let {RenameAgentDialog(m,it,agentSettings=true)}
             }
         }
@@ -3189,7 +3671,7 @@ internal val pinnedStripArrangement = Arrangement.spacedBy(8.dp, Alignment.Cente
     BackHandler(onBack=when {
         chooseWorkspace -> { {chooseWorkspace=false} }
         m.renamingAgent!=null -> m::cancelRename
-        else -> m::dismissAgentSwitcher
+        else -> m::backToSshConnections
     })
     m.renamingAgent?.let {RenameAgentDialog(m,it)}
     if(chooseWorkspace) WorkspaceTerminalPicker(m.createWorkspaceChoices,
@@ -3309,16 +3791,7 @@ internal val pinnedStripArrangement = Arrangement.spacedBy(8.dp, Alignment.Cente
                 verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,
                 horizontalArrangement=Arrangement.spacedBy(6.dp),
             ) {
-                PocketIconControl(
-                    label=stringResource(R.string.connection_settings),
-                    onClick=m::connectionFromAgents,
-                    enabled=!m.switchBusy,
-                ) { color ->
-                    Icon(
-                        painter=painterResource(R.drawable.ic_connection_gear),
-                        contentDescription=null, tint=color, modifier=Modifier.size(24.dp),
-                    )
-                }
+                RoundBackArrow("Back to SSH connections",m::backToSshConnections,48.dp)
                 Box(Modifier.weight(1f),contentAlignment=Alignment.Center) {
                     AgentRosterViewSwitch(rosterView,onRosterViewChange)
                 }

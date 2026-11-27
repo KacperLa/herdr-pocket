@@ -112,7 +112,7 @@ internal enum class LiveVoiceUiPhase {
 @Composable internal fun LiveVoiceDockControl(voice:PocketLiveVoice, inputEnabled:Boolean) {
     val context=androidx.compose.ui.platform.LocalContext.current
     val lifecycle=androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
-    val visible=if(inputEnabled) voice.routeIdentity() else null
+    val visible=if(inputEnabled && voice.canStartFromDock) voice.routeIdentity() else null
     val current by androidx.compose.runtime.rememberUpdatedState(visible)
     val gate=androidx.compose.runtime.remember {LiveVoicePermissionGate()}
     fun resumed()=lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)

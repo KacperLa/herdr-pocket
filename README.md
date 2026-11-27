@@ -26,8 +26,8 @@ Get the signed ARM64 APK from [GitHub Releases](https://github.com/KacperLa/herd
 ## Connect to your host
 
 1. On your host, install and run [Herdr TUI](https://herdr.dev/tui/). Leave the Herdr server running with the sessions you want to reach.
-2. In Pocket, enter the SSH host and username, then choose your private key. The SSH account must be able to reach the Herdr session. For a named session, enter its name under **Advanced options**.
-3. Tap **Connect to Herdr TUI**. On first connection, compare the displayed SHA-256 host fingerprint with one obtained through a trusted route before saving it. Then open an agent or switch to **Spaces** to find a shell.
+2. In Pocket, open **SSH connections** and select **Add connection**. Enter the SSH host and username, choose your private key, and save. The SSH account must be able to reach the Herdr session. For a named session, open the connection’s **Settings** and enter its name under **Advanced options**.
+3. Tap **Connect** from the list, or **Connect to Herdr TUI** in settings. On first connection, compare the displayed SHA-256 host fingerprint with one obtained through a trusted route before saving it. Then open an agent or switch to **Spaces** to find a shell.
 
 <a href="docs/screenshots/ssh-verification.webp"><img src="docs/screenshots/ssh-verification.webp" width="420" alt="Connection settings checking the demo server’s SSH host key before authentication"></a>
 
@@ -43,6 +43,14 @@ Get the signed ARM64 APK from [GitHub Releases](https://github.com/KacperLa/herd
 | Herdr Core | A separate connection mode using [`hc`](https://github.com/herdrdev/herdr-core). It does not share the TUI roster or offer TUI file browsing and alerts. |
 
 Direct TUI attach does not forward Kitty images. If a direct terminal already has an attached client, Pocket does not take it over. For hosts without compatible direct attach, you can run the full TUI with an attach-only custom command under **Advanced options**.
+
+### Saved SSH connections
+
+From a Herdr terminal, go **Back** to that host’s Agents view, then **Back** again to **SSH connections**. Open **Settings** from the host’s row and use **Back** to return to the list. Use **Add connection** to enter another host, username, port, and optional display name, and select its private key. Saving or editing a host does not switch away from your current connection.
+
+Tap the highlighted **Connected** host to reopen its Agents view (or its terminal for a custom attachment). Use **Connect** to switch to another host. Pocket connects to one host at a time and can reconnect to the last selected host at startup once it has been set up and verified. **Remove** asks for confirmation and clears the profile from Pocket without deleting your key file or changing the server. Removing the current host leaves Pocket disconnected until you choose another one.
+
+Open **App settings** on the **SSH connections** screen for app-wide agent alerts, dictation, and Live Voice (including API endpoints and keys). A host’s own **Settings** contains its SSH keys, fingerprint, and connection options.
 
 ### SSH trust
 

@@ -80,3 +80,12 @@ After a failed test or call, open **Live Voice preview → View diagnostics →
 Copy diagnostics**. The recent log exists only in memory and contains
 allowlisted event names and counts, not URLs, keys, terminal text, transcripts
 or raw service responses.
+
+### Read-only Codex progress
+
+On a connected Codex terminal, open the agent menu and select **Show Codex
+progress**. Pocket checks the pane's Herdr session binding and displays saved
+commentary from the latest Codex turn. Updates can lag until Codex saves them.
+This is independent of Live Voice: it does not send commentary to the voice
+service, execute commands in the terminal, or handle questions or approvals.
+Pocket checks for updates only while the progress panel is open in the foreground.
