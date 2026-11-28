@@ -155,15 +155,16 @@ internal fun LiveVoiceDialogs(voice:PocketLiveVoice) {
         PocketDialog(onDismissRequest=voice::cancelTicket,title={Text("Start Live Voice?")},
             text={
                 Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(10.dp)) {
-                    Text("Microphone audio goes to your Live endpoint. Codex, Claude Code, OpenCode, and nobs use stored replies over SSH. Other agents use the optional extraction service, which receives visible terminal snapshots.")
+                    if(anchor.lucid!=null) Text("Microphone audio and verified Lucid replies go to your Live endpoint. FOSS-Live also receives public progress for requests from this call. Tool approvals stay in Lucid chat.")
+                    else Text("Microphone audio goes to your Live endpoint. Codex, Claude Code, OpenCode, and nobs use stored replies over SSH. Other agents use the optional extraction service, which receives visible terminal snapshots.")
                     Text(if(voice.requireReview) "Pocket asks before submitting a prompt or sharing a reply."
                         else "Review is off: Pocket can send fresh voice requests and read verified stored replies without asking. Terminal approvals and screen-based replies still need review.")
                     if(voice.profile==LiveVoiceProfile.FOSS_LIVE && voice.shareCodexProgress)
                         Text("Codex progress for requests from this call is shared automatically with your FOSS-Live endpoint.")
                     Text("A call stays on when the screen locks. When Android allows notifications, you can end it from the Live Voice notification.")
                     Text("Live: "+(voice.endpoint.orEmpty()))
-                    if(voice.extractorUrl.isNotEmpty()) Text("Optional extractor: "+voice.extractorUrl)
-                    if(voice.extractorUrl.isNotEmpty()) OutlinedTextField(value=bottomLines,onValueChange={ value ->
+                    if(anchor.lucid==null && voice.extractorUrl.isNotEmpty()) Text("Optional extractor: "+voice.extractorUrl)
+                    if(anchor.lucid==null && voice.extractorUrl.isNotEmpty()) OutlinedTextField(value=bottomLines,onValueChange={ value ->
                         if(value.length<=2 && value.all {it in '0'..'9'}) bottomLines=value
                     },label={Text("Ignore bottom lines")},singleLine=true,isError=bottomLines.isNotEmpty() && bottom==null,
                         supportingText={Text("0–${LiveExtractionWindow.MAX_IGNORED_LINES}. Only applies to the optional extractor for other agents.")},

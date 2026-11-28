@@ -219,12 +219,98 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         liveVoice.stop()
         sshNavigation=SshNavigation.Settings
     }
+    internal var lucidAdvertisements by mutableStateOf<Map<String,LucidAdvertisement>>(emptyMap())
+        private set
+    internal suspend fun discoverLucid() {
+        lucidAdvertisements=emptyMap()
+        if(!connectionIsOpen) return
+        val id=selectedHostId
+        while(id==selectedHostId && connectionIsOpen) {
+            val transport=ssh.transportIdentity() ?: return
+            val result=withContext(Dispatchers.IO) {ssh.lucidList()}
+            if(id!=selectedHostId || !connectionIsOpen || ssh.transportIdentity()!==transport) return
+            lucidAdvertisements=result
+            if(!showAgentSwitcher || sshNavigation!=SshNavigation.Session) return
+            delay(5000)
+        }
+    }
+    private class LucidRoute(val host:String?,val transport:Any,val location:TuiLocation,val session:String?)
+    private var lucidRoute:LucidRoute?=null
+    private var lucidRosterRecovery:LucidRoute?=null
+    internal var lucidAgentRow by mutableStateOf<CoreSession?>(null)
+        private set
+    internal val lucidVoiceLink=LucidVoiceLink()
+
+    private fun currentLucid(route:LucidRoute):Boolean =
+        lucidRoute===route && sshNavigation==SshNavigation.LucidChat && selectedHostId==route.host &&
+            ssh.transportIdentity()===route.transport
+
+    internal var lucidTunnelFactory:(()->LucidTunnel)?=null
+        private set
+    internal fun closeLucidChat() {
+        if(sshNavigation!=SshNavigation.LucidChat) return
+        val exited=lucidRoute
+        val lost=exited?.let {ssh.transportIdentity()!==it.transport}==true
+        lucidRosterRecovery=exited
+        liveVoice.stop()
+        dismissAgentMenu()
+        lucidVoiceLink.unbind()
+        lucidTunnelFactory=null
+        lucidAgentRow=null
+        lucidRoute=null
+        sshNavigation=SshNavigation.Session
+        showAgentSwitcher=true
+        if(lost) recoverLucidRoster()
+    }
+
+    private fun recoverLucidRoster() {
+        val exited=lucidRosterRecovery ?: return
+        if(exited.host!=selectedHostId || !showAgentSwitcher || sshNavigation!=SshNavigation.Session ||
+            ssh.transportIdentity()!=null) return
+        lucidRosterRecovery=null
+        busy=false
+        terminalVisible=false
+        displayedPty=null
+        activeCoreAddress=null
+        showSessionPicker=true
+        status="SSH connection lost · reconnecting…"
+        connect(list=true,pinnedOnly=true,backend=AgentBackend.TUI,tuiSessionName=exited.session,keepColdRoster=true)
+    }
+
+    internal fun chooseLucidOrTerminal(session:CoreSession) {
+        if(!lucidMatches(session,lucidAdvertisements)) {chooseAgent(session);return}
+        if(switchBusy || !showAgentSwitcher) return
+        val host=selectedHostId
+        val transport=ssh.transportIdentity() ?: return
+        val requested=session.tuiLocation ?: return
+        viewModelScope.launch {
+            val found=withContext(Dispatchers.IO) {ssh.lucidList()}
+            if(ssh.transportIdentity()!==transport || host!=selectedHostId || !showAgentSwitcher || sshNavigation!=SshNavigation.Session) return@launch
+            val current=switchSessions.singleOrNull {it.address==session.address} ?: return@launch
+            lucidAdvertisements=found
+            if(current.tuiLocation!=requested) return@launch
+            if(lucidMatches(current,found)) {
+                val route=LucidRoute(host,transport,requested,if(showSessionPicker) listedTuiSession else resume?.tuiSession)
+                lucidTunnelFactory=ssh.lucidTunnel(paneId=requested.paneId)
+                if(lucidTunnelFactory!=null) {
+                    lucidRosterRecovery=null
+                    lucidRoute=route
+                    lucidAgentRow=current
+                    sshNavigation=SshNavigation.LucidChat
+                    return@launch
+                }
+            }
+            chooseAgent(current)
+        }
+    }
     internal fun openAppSettings() {
         sshNavigation=SshNavigation.AppSettings
     }
     internal fun backToSshConnections() {
+        lucidRosterRecovery=null
         clearHostManageNotice()
         editorKey=null
+        lucidTunnelFactory=null
         sshNavigation=sshNavigation.back()
     }
     internal val canResumeConnection get()=terminalVisible || showAgentSwitcher
@@ -812,7 +898,10 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         displayedPty?.takeIf {sshNavigation==SshNavigation.Session && !retainedTerminal && !demo && busy && terminalVisible && !showAgentSwitcher &&
             status=="Connected · SSH PTY" && ssh.terminalIdentity()===it}
     internal val liveVoice by lazy {
-        PocketLiveVoice(getApplication<Application>(),prefs,viewModelScope,ssh) {
+        PocketLiveVoice(getApplication<Application>(),prefs,viewModelScope,ssh) anchor@{
+            val lucid=lucidRoute?.takeIf(::currentLucid)
+            if(lucid!=null && !agentMenuOpen && filesUi==null && lucidVoiceLink.available)
+                return@anchor TuiLiveAnchor(lucid,lucid.location.terminalId,lucid.session,"",lucidVoiceLink)
             val target=resume?.takeIf {it.backend==AgentBackend.TUI}
             val address=activeCoreAddress
             val pty=speechTerminalIdentity()
@@ -1112,7 +1201,8 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         private set
     internal var agentSettingsLoading by mutableStateOf(false)
         private set
-    private class AgentSettingsRoute(val pty:Any,val address:String,val target:ResumeTarget)
+    private class AgentSettingsRoute(val pty:Any,val address:String,val backend:AgentBackend,val session:String?,
+        val terminal:ResumeTarget?=null,val lucid:LucidRoute?=null)
     private sealed interface AgentSettingsWork {
         data class Read(val renamed:TuiMutations.RenameTarget?=null) : AgentSettingsWork
         data class Verify(val location:TuiLocation,val label:String,val kind:TuiMutations.RenameTarget) : AgentSettingsWork
@@ -1124,14 +1214,15 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
 
     private fun currentAgentSettings(route:AgentSettingsRoute):Boolean =
         agentSettingsRoute===route && agentSettingsOpen && agentMenuOpen && filesUi==null &&
-            displayedPty===route.pty && speechTerminalIdentity()===route.pty &&
-            activeCoreAddress==route.address && resume===route.target && route.target.address==route.address
+            (route.lucid?.let(::currentLucid) ?:
+                (displayedPty===route.pty && speechTerminalIdentity()===route.pty &&
+                    activeCoreAddress==route.address && resume===route.terminal && route.terminal?.address==route.address))
 
     private var codexProgressOperation:Pair<Long,CompletableDeferred<SshSession.Event.OperationList>>?=null
     internal val codexProgressAnchor:Any? get() {
         val route=agentSettingsRoute ?: return null
         val agent=activeAgentDetails ?: return null
-        return route.takeIf {currentAgentSettings(it) && it.target.backend==AgentBackend.TUI &&
+        return route.takeIf {currentAgentSettings(it) && it.backend==AgentBackend.TUI &&
             agent.address==it.address && agent.agent.equals("codex",true) &&
             agent.tuiLocation?.terminalId==it.address}
     }
@@ -1155,7 +1246,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                 ssh.cancelOperation(id)
             }
         }
-        val verify=LiveAgentHerdr.get(location,route.target.tuiSession)
+        val verify=LiveAgentHerdr.get(location,route.session)
         fun instance(reply:LiveAgentHerdr.Reply?)=reply?.let {LiveAgentHerdr.status(it,location)}?.instance
         val before=instance(query(verify)) ?: return unavailable
         val thread=LiveCodexHistory.threadId(before)
@@ -1176,16 +1267,20 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
     internal val canRenameActiveAgent:Boolean get() {
         val route=agentSettingsRoute ?: return false
         val details=activeAgentDetails ?: return false
-        return currentAgentSettings(route) && route.target.backend==AgentBackend.TUI && !agentSettingsLoading &&
+        return currentAgentSettings(route) && route.backend==AgentBackend.TUI && !agentSettingsLoading &&
             details.address==route.address && details.tuiLocation?.terminalId==route.address
     }
 
     private fun openAgentSettings() {
         if(!agentMenuOpen || agentSettingsOpen || filesUi!=null) return
-        val target=resume ?: return
-        val pty=speechTerminalIdentity() ?: return
-        val address=activeCoreAddress?.takeIf {it==target.address} ?: return
-        val route=AgentSettingsRoute(pty,address,target)
+        val lucid=lucidRoute?.takeIf(::currentLucid)
+        val route=if(lucid!=null) AgentSettingsRoute(lucid.transport,lucid.location.terminalId,AgentBackend.TUI,lucid.session,lucid=lucid)
+        else {
+            val target=resume ?: return
+            val pty=speechTerminalIdentity() ?: return
+            val address=activeCoreAddress?.takeIf {it==target.address} ?: return
+            AgentSettingsRoute(pty,address,target.backend,target.tuiSession,terminal=target)
+        }
         agentSettingsRoute=route
         activeAgentDetails=null
         agentSettingsOpen=true
@@ -1197,7 +1292,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         val route=agentSettingsRoute ?: return
         if(!currentAgentSettings(route) || agentSettingsLoading) return
         beginAgentSettings(route,AgentSettingsWork.Read(),
-            route.target.backend.listCommand(route.target.tuiSession))
+            route.backend.listCommand(route.session))
     }
 
     internal fun dismissAgentSettings() {
@@ -1247,12 +1342,12 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         val ok=event.exitStatus==0
         when(work) {
             is AgentSettingsWork.Read -> {
-                val details=if(ok) runCatching {activeProfileRow(route.target.backend.parse(response),route.address)}.getOrNull() else null
-                activeAgentDetails=details
-                if(details!=null) {
-                    agentName=details.name
+                val details=if(ok) runCatching {activeProfileRow(route.backend.parse(response),route.address)}.getOrNull() else null
+                activeAgentDetails=details?.takeIf {route.lucid==null || it.tuiLocation==route.lucid.location}
+                if(activeAgentDetails!=null && details!=null) {
+                    if(route.lucid!=null) lucidAgentRow=details else agentName=details.name
                     if(work.renamed!=null) {
-                        hostPrefs.edit().putString("agent",details.name).apply()
+                        if(route.lucid==null) hostPrefs.edit().putString("agent",details.name).apply()
                         agentSettingsNotice="${work.renamed.displayName} renamed."
                     }
                 } else agentSettingsNotice=if(work.renamed!=null)
@@ -1267,12 +1362,12 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                     return
                 }
                 beginAgentSettings(route,AgentSettingsWork.Rename(work.location,work.label,work.kind),
-                    TuiMutations.renameTarget(work.location,work.kind,work.label,route.target.tuiSession))
+                    TuiMutations.renameTarget(work.location,work.kind,work.label,route.session))
             }
             is AgentSettingsWork.Rename -> {
                 if(ok && TuiMutations.confirmsTarget(response,work.location,work.kind,work.label)) {
                     beginAgentSettings(route,AgentSettingsWork.Read(work.kind),
-                        route.target.backend.listCommand(route.target.tuiSession))
+                        route.backend.listCommand(route.session))
                 } else {
                     activeAgentDetails=null
                     agentSettingsNotice=TuiMutations.renameRejection(response,event.stderr.toString(Charsets.UTF_8))
@@ -1298,7 +1393,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private class FilesRoute(val pty: Any, val address: String, val session: String?)
+    private class FilesRoute(val pty: Any, val address: String, val session: String?,val lucid:LucidRoute?=null)
     private data class FilesRead(val parts: List<String>, val preview: Boolean = false)
     private var filesRoute: FilesRoute? = null
     private var filesLookup: Long? = null
@@ -1344,7 +1439,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
     private var filesMkdirRequest:SshSession.FileRequest?=null
 
     internal fun openAgentMenu() {
-        if (canSwitchAgents && terminalVisible && !showAgentSwitcher) {
+        if (lucidRoute?.let(::currentLucid)==true || canSwitchAgents && terminalVisible && !showAgentSwitcher) {
             liveVoice.stop()
             agentMenuOpen = true
             openAgentSettings()
@@ -1359,22 +1454,27 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
 
     internal fun openAgentFiles() {
         if (!agentMenuOpen || agentSettingsLoading || filesUi != null) return
-        val target = resume
-        val address = activeCoreAddress
-        val pty = speechTerminalIdentity()
-        if (target?.backend != AgentBackend.TUI || address == null || pty == null) {
-            filesUi = AgentFilesUiState(error = "Files needs a connected Herdr TUI terminal.", canRetry = false)
-            return
+        val lucid=lucidRoute?.takeIf(::currentLucid)
+        filesRoute=if(lucid!=null) FilesRoute(lucid.transport,lucid.location.terminalId,lucid.session,lucid)
+        else {
+            val target = resume
+            val address = activeCoreAddress
+            val pty = speechTerminalIdentity()
+            if (target?.backend != AgentBackend.TUI || address == null || pty == null) {
+                filesUi = AgentFilesUiState(error = "Files needs a connected Herdr TUI terminal.", canRetry = false)
+                return
+            }
+            FilesRoute(pty,address,target.tuiSession)
         }
-        filesRoute = FilesRoute(pty, address, target.tuiSession)
         filesUi = AgentFilesUiState(loading = true)
         resolveFilesRoot()
     }
 
     private fun currentFilesRoute(route: FilesRoute): Boolean =
-        filesRoute === route && activeCoreAddress == route.address && displayedPty === route.pty &&
-            ssh.terminalIdentity() === route.pty && resume?.backend == AgentBackend.TUI &&
-            resume?.tuiSession == route.session
+        filesRoute === route && (route.lucid?.let(::currentLucid) ?:
+            (activeCoreAddress == route.address && displayedPty === route.pty &&
+                ssh.terminalIdentity() === route.pty && resume?.backend == AgentBackend.TUI &&
+                resume?.tuiSession == route.session))
 
     private fun resolveFilesRoot() {
         val route = filesRoute ?: return
@@ -1389,7 +1489,9 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         val route = filesRoute ?: return
         if (!currentFilesRoute(route)) return
         val root = if (event.exitStatus == 0) runCatching {
-            AgentFiles.root(event.stdout.toString(Charsets.UTF_8), route.address)
+            val stdout=event.stdout.toString(Charsets.UTF_8)
+            if(route.lucid!=null && AgentBackend.TUI.parse(stdout).none {it.tuiLocation==route.lucid.location}) null
+            else AgentFiles.root(stdout,route.address)
         }.getOrNull() else null
         if (root == null) {
             filesUi = filesUi?.copy(loading = false, error = "Herdr did not report a working folder for this terminal.")
@@ -1521,7 +1623,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
         download.copying=true
         Dispatchers.IO.dispatch(kotlin.coroutines.EmptyCoroutineContext,Runnable {
             fun checkRoute() {
-                if(!download.gate.canWrite || ssh.terminalIdentity()!==download.route.pty) throw IOException("Download canceled")
+                if(!download.gate.canWrite || !ssh.isFilesIdentity(download.route.pty)) throw IOException("Download canceled")
             }
             var failure:String?=null
             try {
@@ -1903,6 +2005,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun chooseAgent(session:CoreSession) {
+        lucidRosterRecovery=null
         if(!showAgentSwitcher || switchBusy) return
         if(showSessionPicker) {
             if(session in switchSessions && session.state=="live") {
@@ -2069,7 +2172,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
     internal fun cancelRename() {renamingAgent=null}
 
     internal fun renameAgent(label:String,kind:TuiMutations.RenameTarget) {
-        val target=resume?.takeIf {it.backend==AgentBackend.TUI} ?: return
+        val target=resume?.takeIf {it.backend==AgentBackend.TUI}
         val selected=renamingAgent ?: return
         val location=selected.tuiLocation ?: return
         if(kind!=TuiMutations.RenameTarget.TAB &&
@@ -2081,9 +2184,10 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                 location.terminalId!=route.address) return
             renamingAgent=null
             beginAgentSettings(route,AgentSettingsWork.Verify(location,label,kind),
-                TuiMutations.inspectTarget(location,kind,target.tuiSession))
+                TuiMutations.inspectTarget(location,kind,route.session))
             return
         }
+        if(target==null) return
         if(!showAgentSwitcher || !canSwitchAgents || switchBusy || selected !in switchSessions ||
             location.terminalId!=selected.address) return
         renamingAgent=null
@@ -2429,7 +2533,11 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                     switchingNewTerminal=false
                 }
                 is SshSession.Event.TerminalEnded -> returnToRosterAfterTerminalEnded(event)
-                is SshSession.Event.TransportLost -> reattachAfterLoss()
+                is SshSession.Event.TransportLost -> {
+                    if(sshNavigation==SshNavigation.LucidChat) closeLucidChat()
+                    else if(lucidRosterRecovery!=null && showAgentSwitcher && sshNavigation==SshNavigation.Session) recoverLucidRoster()
+                    else reattachAfterLoss()
+                }
                 is SshSession.Event.RejectedHostKey -> {
                     suspendCurrentTerminal()
                     // Show verification instead of trapping a rejected reconnect on the stale terminal.
@@ -2480,6 +2588,9 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
                         else "Disconnected · remote exit ${event.exitStatus ?: "unknown"}"
                 }
                 is SshSession.Event.Failed -> {
+                    if(sshNavigation==SshNavigation.LucidChat) {closeLucidChat();return@post}
+                    if(lucidRosterRecovery!=null && showAgentSwitcher && sshNavigation==SshNavigation.Session &&
+                        ssh.transportIdentity()==null) {recoverLucidRoster();return@post}
                     suspendCurrentTerminal()
                     reconnectOffered=probeContext==null
                     val automatic=finishStartup()
@@ -2729,6 +2840,7 @@ class PocketModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun disconnect(manual:Boolean=false) {
+        lucidRosterRecovery=null
         if(manual) hostPrefs.edit().putBoolean("startup_manually_disconnected",true).apply()
         liveVoice.stop()
         if(AgentWatchService.state.value is AgentWatchServiceState.Active) AgentWatchService.stop(getApplication<Application>())
@@ -2850,6 +2962,9 @@ class MainActivity : ComponentActivity() {
  var rosterView by rememberSaveable { mutableStateOf(AgentRosterView.AGENTS) }
  val agentsScroll=rememberLazyListState()
  val spacesScroll=rememberLazyListState()
+ LaunchedEffect(m.selectedHostId,m.connectionIsOpen,m.showAgentSwitcher,m.sshNavigation) {
+    m.discoverLucid()
+ }
 
  LiveVoiceDialogs(m.liveVoice)
 
@@ -2894,6 +3009,17 @@ class MainActivity : ComponentActivity() {
     SshNavigation.Connections -> { SavedConnectionsScreen(m,onOpenAgents={rosterView=AgentRosterView.AGENTS}); return }
     SshNavigation.Settings -> {
         ConnectionSettingsScreen(m,chooseKey)
+        return
+    }
+    SshNavigation.LucidChat -> {
+        val overlay=m.agentMenuOpen || m.filesUi!=null
+        Box(Modifier.fillMaxSize()) {
+            m.lucidTunnelFactory?.let {open ->
+                LucidChatScreen(open,m.lucidAgentRow?.name ?: "Lucid",overlay,m.liveVoice,m.lucidVoiceLink,
+                    m.dictationPressEnter,onBack={rosterView=AgentRosterView.AGENTS;m.closeLucidChat()},onDetails=m::openAgentMenu)
+            }
+            AgentSessionDetails(m,saveFile,uploadFile,lucid=true)
+        }
         return
     }
     SshNavigation.AppSettings -> {
@@ -3571,7 +3697,6 @@ private data class PendingTerminalLink(val target:TerminalWebLink,val route:Remo
 }
 
 @Composable private fun CoreTerminal(m:PocketModel,saveFile:()->Unit,uploadFile:()->Unit,opening:TerminalOpeningUi?,onBack:()->Unit) {
-    val headerSize=maxOf(48.dp, with(LocalDensity.current) {24.sp.toDp()} + 16.dp)
     val files = m.filesUi
     val menuOpen = m.agentMenuOpen
     val back=if(opening!=null) m::cancelTerminalOpening else onBack
@@ -3597,42 +3722,60 @@ private data class PendingTerminalLink(val target:TerminalWebLink,val route:Remo
     Box(Modifier.fillMaxSize().safeDrawingPadding()) {
         TerminalPanel(m,Modifier.fillMaxSize().imePadding().then(restoreAction),
             suspended=menuOpen || files!=null,opening=opening!=null) {
-            if (!headerHidden && !menuOpen && files == null) Row(
-                Modifier.align(androidx.compose.ui.Alignment.TopStart).fillMaxWidth()
-                    .then(swipeToHide).padding(horizontal=12.dp,vertical=6.dp),
-                verticalAlignment=androidx.compose.ui.Alignment.CenterVertically,
-                horizontalArrangement=Arrangement.spacedBy(8.dp),
-            ) {
-                RoundBackArrow(if(opening!=null) stringResource(android.R.string.cancel) else "Back to agents",back,headerSize)
-                Box(Modifier.weight(1f)) {
-                    Surface(
-                        shape=CircleShape,color=PocketBlack,contentColor=PocketInk,
-                        border=BorderStroke(1.dp,PocketOutline),
-                    ) {
-                        Box(Modifier.height(headerSize),contentAlignment=androidx.compose.ui.Alignment.Center) {
-                            val hideAction=if(interactiveHeader) Modifier.semantics {
-                                customActions=listOf(CustomAccessibilityAction(hideHeader) {headerHidden=true;true})
-                            } else Modifier
-                            Text((opening?.title ?: m.agentName).ifBlank{"Agent"},fontSize=20.sp,lineHeight=24.sp,
-                                modifier=Modifier.padding(horizontal=15.dp).then(hideAction),
-                                maxLines=1,overflow=TextOverflow.Ellipsis)
-                        }
-                    }
-                }
-                AgentActionsMenu(headerSize,m::openAgentMenu,enabled=opening==null)
+            if(!headerHidden && !menuOpen && files==null) {
+                val hideAction=if(interactiveHeader) Modifier.semantics {
+                    customActions=listOf(CustomAccessibilityAction(hideHeader) {headerHidden=true;true})
+                } else Modifier
+                AgentSessionHeader(opening?.title ?: m.agentName,
+                    if(opening!=null) stringResource(android.R.string.cancel) else "Back to agents",
+                    back,m::openAgentMenu,enabled=opening==null,
+                    modifier=Modifier.align(Alignment.TopStart).then(swipeToHide).padding(horizontal=12.dp,vertical=6.dp),
+                    titleModifier=hideAction,titleAlignment=Alignment.Center)
             }
         }
-        when {
-            files != null -> AgentFilesExplorer(files,m::openFilesEntry,m::backInFiles,m::retryFiles,onDownload=saveFile,onUpload=uploadFile,
-                onDeleteEntry=m::askDeleteFilesEntry,onConfirmDelete=m::confirmFilesDelete,onCancelDelete=m::cancelFilesDelete,
-                onNewFolder=m::askNewFilesFolder,onConfirmNewFolder=m::confirmNewFilesFolder,onCancelNewFolder=m::cancelNewFilesFolder)
-            menuOpen -> {
-                AgentMenuScreen(m.activeAgentDetails?.name ?: m.agentName,m.activeAgentDetails,m.rosterAvatarScope,
-                    m.canRenameActiveAgent,m.agentSettingsLoading,m.agentSettingsNotice,
-                    m::askToRenameActiveAgent,m::refreshAgentSettings,m::openAgentFiles,m::dismissAgentSettings,
-                    progressAnchor=m.codexProgressAnchor,readProgress=m::readCodexProgress)
-                m.renamingAgent?.let {RenameAgentDialog(m,it,agentSettings=true)}
+        AgentSessionDetails(m,saveFile,uploadFile)
+    }
+}
+
+@Composable internal fun agentSessionControlSize():Dp =
+    maxOf(48.dp,with(LocalDensity.current) {24.sp.toDp()}+16.dp)
+
+@Composable internal fun AgentSessionHeader(
+    title:String,backLabel:String,onBack:()->Unit,onDetails:()->Unit,enabled:Boolean=true,
+    modifier:Modifier=Modifier,titleModifier:Modifier=Modifier,titleAlignment:Alignment=Alignment.CenterStart,
+) {
+    val size=agentSessionControlSize()
+    Row(modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically,
+        horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+        RoundBackArrow(backLabel,onBack,size)
+        Box(Modifier.weight(1f),contentAlignment=titleAlignment) {
+            Surface(shape=CircleShape,color=PocketBlack,contentColor=PocketInk,border=BorderStroke(1.dp,PocketOutline)) {
+                Box(Modifier.height(size),contentAlignment=Alignment.Center) {
+                    Text(title.ifBlank {"Agent"},fontSize=20.sp,lineHeight=24.sp,
+                        modifier=Modifier.padding(horizontal=15.dp).then(titleModifier),maxLines=1,overflow=TextOverflow.Ellipsis)
+                }
             }
+        }
+        AgentActionsMenu(size,onDetails,enabled)
+    }
+}
+
+@Composable private fun AgentSessionDetails(m:PocketModel,saveFile:()->Unit,uploadFile:()->Unit,lucid:Boolean=false) {
+    val files=m.filesUi
+    when {
+        files!=null -> AgentFilesExplorer(files,m::openFilesEntry,m::backInFiles,m::retryFiles,onDownload=saveFile,onUpload=uploadFile,
+            onDeleteEntry=m::askDeleteFilesEntry,onConfirmDelete=m::confirmFilesDelete,onCancelDelete=m::cancelFilesDelete,
+            onNewFolder=m::askNewFilesFolder,onConfirmNewFolder=m::confirmNewFilesFolder,onCancelNewFolder=m::cancelNewFilesFolder)
+        m.agentMenuOpen -> {
+            val details=m.activeAgentDetails
+            val lucidType=if(lucid) details?.agent?.takeIf {it.isNotBlank() && !it.equals("lucid",true)}
+                ?.let {"Lucid · $it"} ?: "Lucid" else null
+            AgentMenuScreen(details?.name ?: if(lucid) m.lucidAgentRow?.name ?: "Lucid" else m.agentName,
+                details,m.rosterAvatarScope,m.canRenameActiveAgent,m.agentSettingsLoading,m.agentSettingsNotice,
+                m::askToRenameActiveAgent,m::refreshAgentSettings,m::openAgentFiles,m::dismissAgentSettings,
+                progressAnchor=m.codexProgressAnchor,readProgress=m::readCodexProgress,
+                typeOverride=lucidType,backLabel=if(lucid) "Back to chat" else null)
+            m.renamingAgent?.let {RenameAgentDialog(m,it,agentSettings=true)}
         }
     }
 }
@@ -3688,8 +3831,11 @@ internal val pinnedStripArrangement = Arrangement.spacedBy(8.dp, Alignment.Cente
     var statusFilter by rememberSaveable {mutableStateOf(SpaceStatusFilter.ALL)}
     val isFiltered=search.isNotBlank() || statusFilter!=SpaceStatusFilter.ALL
     val pins=m.rosterPins
-    val agentRows=remember(sessions,isAgents,search,statusFilter,pins) {
-        if(isAgents) filteredAgentRoster(sessions,search,statusFilter,pins) else emptyList()
+    val lucid=m.lucidAdvertisements
+    val agentRows=remember(sessions,isAgents,search,statusFilter,pins,lucid) {
+        if(isAgents) filteredAgentRoster(sessions.map {
+            if(lucidMatches(it,lucid) && !it.isAgent) it.copy(agent="lucid",isAgent=true) else it
+        },search,statusFilter,pins) else emptyList()
     }
     val (pinnedAgents,ordinaryAgents)=remember(agentRows,pins) {agentRows.partition {it.address in pins}}
     val pinnedStripLabel=stringResource(R.string.roster_agent_pinned_strip)
@@ -3864,14 +4010,16 @@ private fun LazyListScope.rosterRows(m:PocketModel,rows:List<CoreSession>,spaces
 }
 
 @Composable private fun AgentRosterRow(m:PocketModel,session:CoreSession,spacesMode:Boolean,pinnedTile:Boolean=false) {
+    val actual=m.switchSessions.singleOrNull {it.address==session.address} ?: session
+    val native=!spacesMode && lucidMatches(actual,m.lucidAdvertisements)
     AgentPickerRow(
         session=session,
         current=session.address==m.activeCoreAddress,
         tui=m.switchingTuiAgents,
         enabled=!m.switchBusy,
-        onClick={m.chooseAgent(session)},
-        onRename=if(m.canSwitchAgents && m.switchingTuiAgents && session.tuiLocation!=null) {{m.askToRename(session)}} else null,
-        onTogglePin=if(m.canPinAgent(session)) {{m.toggleAgentPin(session)}} else null,
+        onClick={if(native) m.chooseLucidOrTerminal(actual) else m.chooseAgent(actual)},
+        onRename=if(m.canSwitchAgents && m.switchingTuiAgents && actual.tuiLocation!=null) {{m.askToRename(actual)}} else null,
+        onTogglePin=if(m.canPinAgent(actual)) {{m.toggleAgentPin(actual)}} else null,
         pinned=m.isAgentPinned(session),
         pinnedTile=pinnedTile,
         spacesMode=spacesMode,

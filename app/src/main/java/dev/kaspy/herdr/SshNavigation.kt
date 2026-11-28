@@ -5,11 +5,13 @@ internal sealed interface SshNavigation {
     data object Session : SshNavigation
     data object Settings : SshNavigation
     data object AppSettings : SshNavigation
+    data object LucidChat : SshNavigation
     data object Connections : SshNavigation
     data class Edit(val id:String?) : SshNavigation
 
     fun back():SshNavigation = when(this) {
         Session, Settings, AppSettings, is Edit -> Connections
+        LucidChat -> Session
         Connections -> Connections
     }
 }

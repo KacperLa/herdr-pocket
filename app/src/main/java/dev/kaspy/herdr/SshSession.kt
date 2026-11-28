@@ -170,6 +170,72 @@ class SshSession(private val onEvent: (Long, Event) -> Unit) : AutoCloseable {
             ?.channel?.takeIf { it.isConnected }
     }
 
+    internal fun transportIdentity(): Any? = synchronized(lock) {
+        active?.takeIf {it.setupComplete && !it.ending && it.session?.isConnected==true}
+    }
+
+    internal fun isFilesIdentity(identity:Any):Boolean = synchronized(lock) {
+        active?.let {it.setupComplete && !it.ending && it.session?.isConnected==true &&
+            (it===identity || it.channel===identity)}==true
+    }
+
+    /** Bound to this verified SSH session. Never follows a host switch. */
+    internal fun lucidTunnel(list:Boolean=false,paneId:String?=null): (()->LucidTunnel)? {
+        if((list && paneId!=null) || (!list && (paneId==null || !lucidPaneId.matches(paneId)))) return null
+        val attempt=synchronized(lock) {
+            active?.takeIf {it.setupComplete && !it.ending && it.session?.isConnected==true}
+        } ?: return null
+        val session=attempt.session ?: return null
+        return {
+            val channel=synchronized(lock) {
+                check(active===attempt && !attempt.ending && session.isConnected) {"SSH transport changed"}
+                session.openChannel("exec") as ChannelExec
+            }
+            try {
+                // The same pinned SSH account resolves the installed Lucid executable; only a validated pane ID is passed.
+                val command="PATH=\"\$HOME/.local/bin:\$PATH\"; export PATH; exec lucid pocket "+
+                    if(list) "list" else "connect $paneId"
+                channel.setCommand(command)
+                channel.setPty(false)
+                channel.setErrStream(OutputStream.nullOutputStream())
+                val input=channel.inputStream
+                val output=channel.outputStream
+                channel.connect(4000)
+                synchronized(lock) {check(active===attempt && !attempt.ending) {"SSH transport changed"}}
+                val timer=if(list) deadline.schedule({channel.disconnect()},4,TimeUnit.SECONDS) else null
+                LucidTunnel(input,output) {
+                    timer?.cancel(false)
+                    runCatching {deadline.execute {
+                        if(list) runCatching {channel.disconnect()}
+                        else {
+                            runCatching {output.close()} // SSH channel EOF, not a transport disconnect.
+                            runCatching {deadline.schedule({channel.disconnect()},500,TimeUnit.MILLISECONDS)}
+                        }
+                    }}.onFailure {channel.disconnect()}
+                }
+            } catch(error:Exception) {
+                channel.disconnect()
+                throw error
+            }
+        }
+    }
+
+    internal fun lucidList():Map<String,LucidAdvertisement> {
+        val probe=lucidTunnel(list=true) ?: return emptyMap()
+        return runCatching {
+            probe().use {tunnel ->
+                val buffer=ByteArrayOutputStream()
+                while(true) {
+                    val next=tunnel.input.read()
+                    if(next==-1) break
+                    require(buffer.size()<LUCID_DISCOVERY_MAX_BYTES)
+                    buffer.write(next)
+                }
+                parseLucidAdvertisements(buffer.toString("UTF-8"))
+            }
+        }.getOrDefault(emptyMap())
+    }
+
     fun send(bytes: ByteArray): Boolean = enqueueInput(null, bytes)
 
     fun sendToTerminal(identity: Any, bytes: ByteArray): Boolean = enqueueInput(identity, bytes)
@@ -252,11 +318,11 @@ class SshSession(private val onEvent: (Long, Event) -> Unit) : AutoCloseable {
         onResult: (FileRequest, SftpRead) -> Unit,
     ): FileRequest? {
         val attempt = synchronized(lock) {
-            active?.takeIf { it.setupComplete && !it.ending && it.channel === pty && it.session?.isConnected == true }
+            active?.takeIf { it.setupComplete && !it.ending && (it.channel===pty || it===pty) && it.session?.isConnected == true }
         } ?: return null
         val request = FileRequest()
         val finished = java.util.concurrent.atomic.AtomicBoolean()
-        fun current() = synchronized(lock) { active === attempt && !attempt.ending && attempt.channel === pty }
+        fun current() = synchronized(lock) { active === attempt && !attempt.ending && (attempt.channel===pty || attempt===pty) }
         return try {
             val timeout = deadline.schedule({
                 if (finished.compareAndSet(false, true)) {
@@ -301,12 +367,12 @@ class SshSession(private val onEvent: (Long, Event) -> Unit) : AutoCloseable {
         onResult: (FileRequest, SftpDownload) -> Unit,
     ): FileRequest? {
         val attempt = synchronized(lock) {
-            active?.takeIf { it.setupComplete && !it.ending && it.channel === pty && it.session?.isConnected == true }
+            active?.takeIf { it.setupComplete && !it.ending && (it.channel===pty || it===pty) && it.session?.isConnected == true }
         } ?: return null
         val path = parts.toList()
         val request = FileRequest { destination.delete() }
         val finished = java.util.concurrent.atomic.AtomicBoolean()
-        fun current() = synchronized(lock) { active === attempt && !attempt.ending && attempt.channel === pty }
+        fun current() = synchronized(lock) { active === attempt && !attempt.ending && (attempt.channel===pty || attempt===pty) }
         return try {
             val timeout = deadline.schedule({
                 if (finished.compareAndSet(false, true)) {
@@ -360,12 +426,12 @@ class SshSession(private val onEvent: (Long, Event) -> Unit) : AutoCloseable {
     ):FileRequest? {
         if(!AgentFiles.entryName(name)) return null
         val attempt=synchronized(lock) {
-            active?.takeIf {it.setupComplete && !it.ending && it.channel===pty && it.session?.isConnected==true}
+            active?.takeIf {it.setupComplete && !it.ending && (it.channel===pty || it===pty) && it.session?.isConnected==true}
         } ?: return null
         val path=folderParts.toList()
         val request=FileRequest()
         val reported=java.util.concurrent.atomic.AtomicBoolean()
-        fun current()=synchronized(lock) {active===attempt && !attempt.ending && attempt.channel===pty}
+        fun current()=synchronized(lock) {active===attempt && !attempt.ending && (attempt.channel===pty || attempt===pty)}
         return try {
             val timeout=deadline.schedule({
                 if(!request.canceled && reported.compareAndSet(false,true)) {
@@ -434,13 +500,13 @@ class SshSession(private val onEvent: (Long, Event) -> Unit) : AutoCloseable {
     ):FileRequest? {
         if(!AgentFiles.entryName(name)) return null
         val attempt=synchronized(lock) {
-            active?.takeIf {it.setupComplete && !it.ending && it.channel===pty && it.session?.isConnected==true}
+            active?.takeIf {it.setupComplete && !it.ending && (it.channel===pty || it===pty) && it.session?.isConnected==true}
         } ?: return null
         val path=folderParts.toList()
         val request=FileRequest()
         val reported=java.util.concurrent.atomic.AtomicBoolean()
         val removeSent=java.util.concurrent.atomic.AtomicBoolean()
-        fun current()=synchronized(lock) {active===attempt && !attempt.ending && attempt.channel===pty}
+        fun current()=synchronized(lock) {active===attempt && !attempt.ending && (attempt.channel===pty || attempt===pty)}
         val kind=if(directory) "folder" else "file"
         fun ambiguous()=SftpDelete.Failure("Could not confirm whether the $kind was deleted. Refresh the folder before trying again.")
         return try {
@@ -494,13 +560,13 @@ class SshSession(private val onEvent: (Long, Event) -> Unit) : AutoCloseable {
     ):FileRequest? {
         if(!AgentFiles.newFolderName(name)) return null
         val attempt=synchronized(lock) {
-            active?.takeIf {it.setupComplete && !it.ending && it.channel===pty && it.session?.isConnected==true}
+            active?.takeIf {it.setupComplete && !it.ending && (it.channel===pty || it===pty) && it.session?.isConnected==true}
         } ?: return null
         val path=folderParts.toList()
         val request=FileRequest()
         val reported=java.util.concurrent.atomic.AtomicBoolean()
         val requestStarted=java.util.concurrent.atomic.AtomicBoolean()
-        fun current()=synchronized(lock) {active===attempt && !attempt.ending && attempt.channel===pty}
+        fun current()=synchronized(lock) {active===attempt && !attempt.ending && (attempt.channel===pty || attempt===pty)}
         fun ambiguous()=SftpMkdir.Failure("Could not confirm whether the folder was created. Refresh the folder before trying again.")
         return try {
             val timeout=deadline.schedule({

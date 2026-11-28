@@ -68,6 +68,7 @@ internal fun TerminalDictationControls(
     pressEnter: Boolean,
     onExclusiveDock: () -> Unit,
     buttonEnabled: Boolean = true,
+    chat: Boolean = false,
     shortcuts: @Composable (@Composable () -> Unit) -> Unit,
 ) {
     val context = LocalContext.current
@@ -130,15 +131,17 @@ internal fun TerminalDictationControls(
 
     val enterForTake = take?.pressEnter ?: pressEnter
     val description = when (phase) {
-        DictationPhase.RECORDING, DictationPhase.CAPTURED -> if (enterForTake) "Stop recording, transcribe, and send with Enter"
-            else "Stop recording and insert transcript without Enter"
+        DictationPhase.RECORDING, DictationPhase.CAPTURED -> if(chat) {
+            if(enterForTake) "Stop recording, transcribe, and send" else "Stop recording and insert transcript into the draft"
+        } else if(enterForTake) "Stop recording, transcribe, and send with Enter"
+        else "Stop recording and insert transcript without Enter"
         DictationPhase.PERMISSION -> "Waiting for microphone permission"
         null -> stringResource(R.string.dictation_mic_start)
-        else -> "Cancel terminal dictation"
+        else -> "Cancel dictation"
     }
     val message = when (phase) {
         DictationPhase.PERMISSION -> "Waiting for microphone permission."
-        DictationPhase.WAITING_FOR_RESUME -> "Waiting for the terminal to return to the foreground."
+        DictationPhase.WAITING_FOR_RESUME -> "Waiting for Pocket to return to the foreground."
         DictationPhase.STARTING -> "Starting the microphone."
         DictationPhase.RECORDING -> if (take?.holdToTalk == true) "Recording. Release the mic to finish."
             else "Recording. Pauses are OK. Tap again to finish."
@@ -146,7 +149,7 @@ internal fun TerminalDictationControls(
         DictationPhase.CAPTURED -> "Recording reached its five-minute limit. Tap to finish dictation."
         DictationPhase.TRANSCRIBING -> "Transcribing with Android’s selected speech service."
         DictationPhase.RETRYING -> "Retrying the same recording with Android’s speech service."
-        DictationPhase.SUBMITTING -> "Submitting recognized text to the active terminal."
+        DictationPhase.SUBMITTING -> if(chat) "Adding recognized text to Lucid chat." else "Submitting recognized text to the active terminal."
         null -> dictation.notice ?: "Ready for dictation."
     }
     val exclusive = phase?.replacesQuickActions == true

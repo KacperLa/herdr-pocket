@@ -211,12 +211,14 @@ internal fun AgentMenuScreen(
     onBack: () -> Unit,
     progressAnchor: Any? = null,
     readProgress: (suspend (Any) -> CodexProgress.Snapshot)? = null,
+    typeOverride:String?=null,
+    backLabel:String?=null,
 ) {
     val title = displayFileName(agentName).ifBlank { stringResource(R.string.agent_menu_fallback_title) }
     val scheme = MaterialTheme.colorScheme
     val agent = details?.takeIf { it.isAgent }
     val summary = details?.let(::agentCardSummary)
-    val returnToTerminal = stringResource(R.string.agent_menu_back)
+    val returnToTerminal = backLabel ?: stringResource(R.string.agent_menu_back)
     val focus = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     val backFocus = remember { FocusRequester() }
@@ -273,7 +275,7 @@ internal fun AgentMenuScreen(
                     TextButton(onClick=onRefresh) {Text(stringResource(R.string.agent_files_retry))}
                 }
                 val empty=stringResource(R.string.agent_settings_not_reported)
-                val type=if(agent!=null) agent.agent.takeIf {it.isNotBlank()} else
+                val type=typeOverride ?: if(agent!=null) agent.agent.takeIf {it.isNotBlank()} else
                     details?.let {stringResource(R.string.roster_row_terminal)}
                 Surface(Modifier.fillMaxWidth(),shape=PocketPanelShape,color=PocketBlack,border=BorderStroke(1.dp,PocketOutline)) {
                     Column(Modifier.padding(horizontal=16.dp)) {
